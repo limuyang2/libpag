@@ -44,6 +44,10 @@ local.properties
 
 # CodeBuddy
 .codebuddy/designs/
+CODEBUDDY.local.md
+
+# Skill runtime cache
+.cr-cache/
 
 /third_party
 /out
@@ -83,3 +87,18 @@ mac/PAG
 linux/vendor/
 /PAG
 .cache
+
+# PAGX Playground
+playground/wasm-mt
+playground/build-pagx-playground
+playground/.pagx.wasm-mt.md5
+playground/node_modules
+playground/package-lock.json
+
+# PAGX Site
+public
+
+# PAGX Spec
+spec/node_modules
+spec/package-lock.json
+
