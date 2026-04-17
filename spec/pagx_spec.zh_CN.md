@@ -24,10 +24,12 @@ PAGX 是纯 XML 文件（`.pagx`），可引用外部资源文件（图片、视
 
 本规范按以下顺序组织：
 
-1. **基础数据类型**：定义文档中使用的基本数据格式
-2. **文档结构**：描述 PAGX 文档的整体组织方式
-3. **图层系统**：定义图层及其相关特性（样式、滤镜、遮罩）
-4. **矢量元素系统**：定义图层内容的矢量元素及其处理模型
+- **基础数据类型**：定义文档中使用的基本数据格式
+- **文档结构**：描述 PAGX 文档的整体组织方式
+- **自动布局**：定义布局尺寸、容器布局和约束定位机制
+- **图层系统**：定义图层及其相关功能（样式、滤镜、遮罩）
+- **矢量元素系统**：定义图层内的矢量元素及其处理模型
+- **导入指令**：定义嵌入外部内容的导入指令（内联 `<svg>` 和 `import` 属性）
 
 **附录**（方便速查）：
 
@@ -80,7 +82,7 @@ PAGX 是纯 XML 文件（`.pagx`），可引用外部资源文件（图片、视
 
 ```xml
 <Layer data-name="背景图层" data-figma-id="12:34" data-exported-by="PAGExporter">
-  <Rectangle center="50,50" size="100,100"/>
+  <Rectangle size="100,100"/>
   <Fill color="#FF0000"/>
 </Layer>
 ```
@@ -260,13 +262,14 @@ PAGX 使用标准的 2D 笛卡尔坐标系：
 
 `<pagx>` 是 PAGX 文档的根元素，定义画布尺寸并直接包含图层列表。
 
-> [Sample](samples/3.2_document_structure.pagx)
+> [Sample](samples/document_structure.pagx)
 
 | 属性 | 类型 | 默认值 | 说明 |
 |------|------|--------|------|
-| `version` | string | (必填) | 格式版本 |
 | `width` | float | (必填) | 画布宽度 |
 | `height` | float | (必填) | 画布高度 |
+
+**画布裁剪**：由 `width` 和 `height` 定义的画布作为渲染边界，超出画布区域的内容会被裁剪，不参与渲染。
 
 **图层渲染顺序**：图层按文档顺序依次渲染，文档中靠前的图层先渲染（位于下方），靠后的图层后渲染（位于上方）。
 
@@ -276,7 +279,7 @@ PAGX 使用标准的 2D 笛卡尔坐标系：
 
 **元素位置**：Resources 元素可放置在根元素内的任意位置，对位置没有限制。解析器必须支持元素引用在文档后面定义的资源或图层（即前向引用）。
 
-> [Sample](samples/3.3_resources.pagx)
+> [Sample](samples/resources.pagx)
 
 #### 3.3.1 图片（Image）
 
@@ -326,11 +329,11 @@ PathData 定义可复用的路径数据，供 Path 元素和 TextPath 修改器�
 
 线性渐变沿起点到终点的方向插值。
 
-> [Sample](samples/3.3.3_linear_gradient.pagx)
+> [Sample](samples/linear_gradient.pagx)
 
 | 属性 | 类型 | 默认值 | 说明 |
 |------|------|--------|------|
-| `startPoint` | Point | (必填) | 起点 |
+| `startPoint` | Point | `0,0` | 起点 |
 | `endPoint` | Point | (必填) | 终点 |
 | `matrix` | Matrix | 单位矩阵 | 变换矩阵 |
 
@@ -340,7 +343,7 @@ PathData 定义可复用的路径数据，供 Path 元素和 TextPath 修改器�
 
 径向渐变从中心向外辐射。
 
-> [Sample](samples/3.3.3_radial_gradient.pagx)
+> [Sample](samples/radial_gradient.pagx)
 
 | 属性 | 类型 | 默认值 | 说明 |
 |------|------|--------|------|
@@ -354,7 +357,7 @@ PathData 定义可复用的路径数据，供 Path 元素和 TextPath 修改器�
 
 锥形渐变（也称扫描渐变）沿圆周方向插值。
 
-> [Sample](samples/3.3.3_conic_gradient.pagx)
+> [Sample](samples/conic_gradient.pagx)
 
 | 属性 | 类型 | 默认值 | 说明 |
 |------|------|--------|------|
@@ -378,7 +381,7 @@ PathData 定义可复用的路径数据，供 Path 元素和 TextPath 修改器�
 
 菱形渐变从中心向四角辐射。
 
-> [Sample](samples/3.3.3_diamond_gradient.pagx)
+> [Sample](samples/diamond_gradient.pagx)
 
 | 属性 | 类型 | 默认值 | 说明 |
 |------|------|--------|------|
@@ -414,11 +417,12 @@ PathData 定义可复用的路径数据，供 Path 元素和 TextPath 修改器�
 
 ```xml
 <ImagePattern image="@img1" tileModeX="repeat" tileModeY="repeat"/>
+<ImagePattern image="avatar.png" tileModeX="repeat" tileModeY="repeat"/>
 ```
 
 | 属性 | 类型 | 默认值 | 说明 |
 |------|------|--------|------|
-| `image` | idref | (必填) | 图片引用 "@id" |
+| `image` | string | (必填) | 图片来源：`@id` 资源引用、文件路径或 data URI |
 | `tileModeX` | TileMode | clamp | X 方向平铺模式 |
 | `tileModeY` | TileMode | clamp | Y 方向平铺模式 |
 | `filterMode` | FilterMode | linear | 纹理过滤模式 |
@@ -433,7 +437,7 @@ PathData 定义可复用的路径数据，供 Path 元素和 TextPath 修改器�
 
 **完整示例**：演示不同平铺模式的图片填充
 
-> [Sample](samples/3.3.3_image_pattern.pagx)
+> [Sample](samples/image_pattern.pagx)
 
 ##### 颜色源坐标系统
 
@@ -447,7 +451,7 @@ PathData 定义可复用的路径数据，供 Path 元素和 TextPath 修改器�
 
 **示例**：在 300×300 的区域内绘制一个对角线方向的线性渐变：
 
-> [Sample](samples/3.3.3_color_source_coordinates.pagx)
+> [Sample](samples/color_source_coordinates.pagx)
 
 - 对该图层应用 `scale(2, 2)` 变换：矩形变为 600×600，渐变也随之放大，视觉效果保持一致
 - 直接将 Rectangle 的 size 改为 600,600：矩形变为 600×600，但渐变坐标不变，只覆盖矩形的左上四分之一
@@ -456,7 +460,7 @@ PathData 定义可复用的路径数据，供 Path 元素和 TextPath 修改器�
 
 合成用于内容复用（类似 After Effects 的 Pre-comp）。
 
-> [Sample](samples/3.3.4_composition.pagx)
+> [Sample](samples/composition.pagx)
 
 | 属性 | 类型 | 默认值 | 说明 |
 |------|------|--------|------|
@@ -513,38 +517,333 @@ Glyph 定义单个字形的渲染数据。`path` 和 `image` 二选一必填，�
 PAGX 文档采用层级结构组织内容：
 
 ```
-<pagx>                          ← 根元素（定义画布尺寸）
-├── <Layer>                     ← 图层（可多个）
-│   ├── 几何元素                ← Rectangle、Ellipse、Path、Text 等
-│   ├── 修改器                  ← TrimPath、RoundCorner、TextModifier 等
-│   ├── 绘制器                  ← Fill、Stroke
-│   ├── <Group>                 ← 矢量元素容器（可嵌套）
-│   ├── LayerStyle              ← DropShadowStyle、InnerShadowStyle 等
-│   ├── LayerFilter             ← BlurFilter、ColorMatrixFilter 等
-│   └── <Layer>                 ← 子图层（递归结构）
-│       └── ...
-│
-└── <Resources>                 ← 资源区（可选，定义可复用资源）
-    ├── <Image>                 ← 图片资源
-    ├── <PathData>              ← 路径数据资源
-    ├── <SolidColor>            ← 纯色定义
-    ├── <LinearGradient>        ← 渐变定义
-    ├── <ImagePattern>          ← 图片图案定义
-    ├── <Font>                  ← 字体资源（嵌入字体）
-    │   └── <Glyph>             ← 字形定义
-    └── <Composition>           ← 合成定义
-        └── <Layer>             ← 合成内的图层
+<pagx>                          ← 根元素（画布尺寸）
+├── <Layer>*                    ← 内容与子图层（递归）
+│   ├── VectorElements          ← 几何、修改器、绘制器、Group、TextBox
+│   ├── LayerStyles / Filters   ← 视觉效果
+│   └── <Layer>*                ← 子图层
+└── <Resources>                 ← 可选的可复用定义
+    ├── Image, PathData, Font   ← 资源
+    ├── 颜色源                  ← 渐变、SolidColor、ImagePattern
+    └── <Composition>           ← 可复用的图层子树
 ```
+
+详细的节点分类和包含规则见附录 A。
 
 ---
 
-## 4. 图层系统（Layer System）
+## 4. 自动布局（Auto Layout）
 
-图层（Layer）是 PAGX 内容组织的基本单元，提供了丰富的视觉效果控制能力。
+自动布局让元素声明布局意图，由引擎自动计算坐标和尺寸。布局分两层：**容器布局**控制 Layer 之间的排列，**约束定位**控制元素相对于容器的定位。两者可以单独使用，也可以组合使用。所有布局计算在解析阶段一次性完成，之后布局属性即被丢弃，运行时只保留计算结果。
 
-### 4.1 核心概念
+### 4.1 布局尺寸（Layout Size）
 
-本节介绍图层系统的核心概念，这些概念是理解图层样式、滤镜和遮罩等功能的基础。
+`width`/`height` 属性声明容器的布局尺寸，是两种布局机制的共同基础——容器布局用它确定子 Layer 的可用空间，约束定位用它作为定位的参考系。Layer 和 Group 都可以拥有布局尺寸。
+
+对于子 Layer，容器布局和约束定位是**互斥**的——参与容器布局的子 Layer 由容器控制尺寸，不参与的由约束控制：
+
+**容器布局中**（子 Layer 参与 `layout="horizontal"/"vertical"`）：
+- 主轴：有显式 `width`/`height` → 固定（忽略 flex）；无显式尺寸且 `flex=0`（默认）→ 内容测量；无显式尺寸且 `flex>0` → 按 flex 权重按比例分配剩余空间
+- 交叉轴：`alignment="stretch"` 为未设交叉轴尺寸的子元素拉伸填满（已设交叉轴尺寸的保持不变）
+
+**约束定位中**（无容器布局或子 Layer 设 `includeInLayout="false"`）：
+1. **对边约束**：对边同设约束（`left`+`right` 或 `top`+`bottom`）从父容器推导尺寸（如 `width = 父.width - left - right`），**始终覆盖**显式尺寸
+2. **显式声明**：直接设置 `width`/`height` 属性
+3. **内容测量**：当元素既无显式尺寸也无对边约束时，引擎自动从内容边界计算尺寸——容器会被内容撑大。
+
+   对 Group 和 Layer，测量值从本地原点 (0,0) 到所有内部元素内容边界（含约束贡献的边距）的右下角坐标，确保测量结果不受内部元素排放位置的影响。对 Text，测量值为行盒边界（字形推进宽度之和 × 字体指标行高）。
+
+   这种内容驱动尺寸的机制支持自适应布局模式，例如自动宽度按钮（一个带 `layout="horizontal"` + `padding` 的 Layer 包裹 Text 元素，Layer 自动根据文本内容加内边距计算尺寸）。
+
+这些来源确保容器在布局计算时几乎总有尺寸可用。显式设置 `width`/`height` 只在需要特定设计尺寸（不等于内容自然尺寸）时才必要。
+
+布局尺寸本身不产生直接的渲染效果，仅向下传递尺寸信息供子元素的约束定位使用。布局尺寸和约束计算在元素的本地坐标系中完成。变换（`matrix`/`matrix3D`）在布局计算结果之上叠加——不参与布局计算，也不影响兄弟节点或父节点的位置。
+
+### 4.2 容器布局（Container Layout）
+
+将父 Layer 的 `layout` 属性设为 `horizontal` 或 `vertical` 后，所有子 Layer 沿指定轴自动排列。语义上是 CSS Flexbox 的子集。
+
+```xml
+<!-- 三个等宽卡片水平排列 -->
+<Layer width="920" height="200" layout="horizontal" gap="14" padding="20">
+  <Layer flex="1"><!-- 卡片 A --></Layer>
+  <Layer flex="1"><!-- 卡片 B --></Layer>
+  <Layer flex="1"><!-- 卡片 C --></Layer>
+</Layer>
+```
+
+三个子 Layer 均未设 `width` 且 `flex="1"`，等分可用宽度：`(920 - 40 - 28) / 3 = 284`。
+
+#### 属性
+
+| 属性 | 类型 | 默认值 | 说明 |
+|------|------|--------|------|
+| `layout` | LayoutMode | none | 子图层容器布局模式 |
+| `gap` | float | 0 | 相邻子 Layer 之间的间距 |
+| `flex` | float | 0 | 主轴弹性权重。子元素无显式主轴尺寸时：`flex=0`（默认）使用内容测量尺寸；`flex>0` 按权重按比例分配剩余空间。设置了显式 `width`/`height` 时忽略此属性 |
+| `padding` | float 或 "t,r,b,l" | 0 | 内缩布局内容区域和所有内容（VectorElements 和子 Layers）的约束参考系。支持单值（四边均匀）、两值（垂直,水平）、四值（上,右,下,左），与 CSS shorthand 一致 |
+| `alignment` | Alignment | stretch | 交叉轴对齐方式 |
+| `arrangement` | Arrangement | start | 主轴排布方式 |
+| `includeInLayout` | bool | true | 是否参与父容器的布局排列，设为 false 时脱离布局流 |
+
+**LayoutMode**：
+
+| 值 | 说明 |
+|------|------|
+| `none` | 无容器布局，子图层使用约束属性（`left`/`top`）定位（默认值） |
+| `horizontal` | 主轴水平方向，交叉轴垂直方向 |
+| `vertical` | 主轴垂直方向，交叉轴水平方向 |
+
+**Alignment（交叉轴对齐）**：
+
+| 值 | 说明 |
+|------|------|
+| `start` | 交叉轴起始端对齐 |
+| `center` | 交叉轴居中对齐 |
+| `end` | 交叉轴末尾端对齐 |
+| `stretch` | 拉伸填满交叉轴可用空间，即容器交叉轴尺寸减去两侧 padding（仅对未设交叉轴尺寸的子 Layer 生效） |
+
+**Arrangement（主轴排布）**：
+
+| 值 | 说明 |
+|------|------|
+| `start` | 主轴起始端排布 |
+| `center` | 主轴居中排布 |
+| `end` | 主轴末尾端排布 |
+| `spaceBetween` | 子元素之间均匀分布，首尾贴边 |
+| `spaceEvenly` | 所有间距完全相等，包括首尾两端 |
+| `spaceAround` | 每个子元素两侧等间距，首尾间距为元素间距的一半 |
+
+当 `arrangement` 为 `spaceBetween`、`spaceEvenly` 或 `spaceAround` 时，`gap` 仍会减少弹性子元素的可分配空间，但实际子元素间距完全由 arrangement 公式决定——`gap` 被替换而非叠加。同时设置两者可能产生不直观的结果，建议只使用其中之一。
+
+#### 子元素尺寸
+
+子 Layer 的主轴尺寸有三种状态：
+
+- **固定尺寸**：主轴方向设了 `width`/`height`，不随父容器变化。`flex` 属性被忽略。
+- **内容测量尺寸**：主轴方向未设显式 `width`/`height` 且 `flex=0`（默认）。尺寸由子元素自身内容 bounds 决定。
+- **弹性尺寸**：主轴方向未设显式 `width`/`height` 且 `flex>0`。当父容器有确定的主轴尺寸时，剩余空间（减去固定和内容测量子元素及间距后）按 `flex` 权重在弹性子元素之间按比例分配。当父容器主轴尺寸由内容测量决定时，弹性子元素退化为内容测量尺寸，父容器收缩到恰好容纳所有子元素。
+
+交叉轴尺寸：有显式 `width`/`height` 则使用；当父容器 `alignment="stretch"` 时，未设交叉轴尺寸的子 Layer 拉伸填满交叉轴可用空间（容器交叉轴尺寸减去两侧 padding）；否则由内容 bounds 决定。
+
+内容区域为 `width × height` 减去各边 `padding`。
+
+#### 背景填充与 Padding
+
+由于 `padding` 会内缩所有内容的约束参考系，在有 padding 的 Layer 中使用 `left="0" right="0" top="0" bottom="0"` 的背景 Rectangle 只会填满内缩后的区域。如果背景需要铺满整个 Layer，应使用双层结构：外层放置背景，内层承载 `padding`：
+
+```xml
+<Layer width="300" height="200">
+  <Rectangle left="0" right="0" top="0" bottom="0" roundness="12"/>
+  <Fill color="#FFF"/>
+  <Layer left="0" right="0" top="0" bottom="0" layout="horizontal" gap="8" padding="16">
+    <!-- 内容 -->
+  </Layer>
+</Layer>
+```
+
+内层容器的选择：需要容器布局（`layout`、`gap`、`alignment`、`arrangement`）时使用 `Layer`；仅需 `padding` 内缩 VectorElements 时使用更轻量的 `Group`。
+
+对内容测量的容器（未显式设置 `width`/`height`），padding 会加到测量值上，例如一个包裹 100×50 Rectangle 且 `padding="20"` 的 Group 测量尺寸为 140×90。
+
+`gap`、`alignment` 和 `arrangement` 仍然需要 `layout` 才能生效。
+
+`visible="false"` 的子 Layer 不会渲染，但如果 `includeInLayout` 为 `true`（默认值），仍然参与布局计算。若需将不可见的子 Layer 排除出布局流，需显式设置 `includeInLayout="false"`。
+
+#### 脱离布局流
+
+设了容器布局（`layout="horizontal"` 或 `"vertical"`）的 Layer，默认所有子 Layer 的位置由布局引擎决定。设置 `includeInLayout="false"` 的子 Layer 脱离布局流——不参与排列、不占用空间、不影响容器测量，但仍然可见，可使用约束属性（`left`/`top`）定位。适用于在布局容器内放置装饰层、背景层或角标等不应参与排列的元素。脱离布局流的子 Layer 始终可以使用约束属性（`left`/`right`/`top`/`bottom`/`centerX`/`centerY`），不受父容器 `layout` 模式的限制。
+
+```xml
+<Layer width="400" height="300" layout="vertical" gap="12">
+  <Layer><!-- 参与布局 --></Layer>
+  <Layer><!-- 参与布局 --></Layer>
+  <!-- 角标：脱离布局流，使用 left/top 约束定位 -->
+  <Layer left="370" top="10" includeInLayout="false">
+    <Ellipse size="24,24"/>
+    <Fill color="#EF4444"/>
+  </Layer>
+</Layer>
+```
+
+#### 示例
+
+> [Sample](samples/container_layout.pagx)
+>
+> [Sample](samples/container_layout_include_in_layout.pagx)
+
+### 4.3 约束定位（Constraint Positioning）
+
+约束定位让元素声明与所属容器的位置关系，引擎自动计算坐标。约束定位是所有节点的基础能力，不是一种布局模式。支持约束属性的元素包括：
+
+- **图层内容节点**：几何元素（Rectangle、Ellipse、Polystar、Path）、Text、TextBox、Group 和 TextPath——约束属性始终生效
+- **子 Layer**：当父 Layer 无容器布局（默认），或子 Layer 设了 `includeInLayout="false"` 时
+
+```xml
+<!-- Rectangle 铺满容器并留出 10px 边距 -->
+<Layer width="400" height="200">
+  <Rectangle left="10" right="10" top="10" bottom="10"/>
+  <Fill color="#3B82F6"/>
+</Layer>
+```
+
+#### 属性
+
+| 属性 | 类型 | 默认值 | 说明 |
+|------|------|--------|------|
+| `left` | float | - | 左边缘到容器左边缘的距离 |
+| `right` | float | - | 右边缘到容器右边缘的距离 |
+| `top` | float | - | 上边缘到容器上边缘的距离 |
+| `bottom` | float | - | 下边缘到容器下边缘的距离 |
+| `centerX` | float | - | 相对容器水平中心的偏移（0 = 水平居中） |
+| `centerY` | float | - | 相对容器垂直中心的偏移（0 = 垂直居中） |
+
+**组合规则**：每个轴上只能使用以下组合之一：单边定位（`left`、`right`、`centerX` 任选其一），或对边约束（`left` + `right`）。垂直轴同理（`top` / `bottom` / `centerY`，或 `top` + `bottom`）。如果同一轴上设置了多种组合，引擎按以下优先级解决冲突：`centerX` > `left`+`right` > `left` > `right`（垂直轴同理：`centerY` > `top`+`bottom` > `top` > `bottom`）。低优先级的约束被静默忽略。
+
+**生效条件**：约束属性参照元素的**直接父容器**（Layer 或 Group）的布局尺寸，逐层向下传递——每层容器先确定自身尺寸，其子元素的约束再以该尺寸为参考系。当父容器有 `padding` 时，参考系按 padding 量内缩。由于引擎会自动测量容器尺寸（见 §4.1），约束通常都能生效。不同约束对容器尺寸的依赖程度不同：`left`/`top` 单独使用时，定位公式不涉及容器尺寸（如 `tx = left - bounds.x`），在任何情况下都能正确工作；`right`/`bottom`/`centerX`/`centerY` 以及对边约束需要引用容器尺寸来计算位置。
+
+**Content Bounds**：约束中的「边缘」指元素的 content bounds 边缘。不同元素类型的起点不同：
+
+- **框对齐节点**（Rectangle、Ellipse、Polystar、TextBox、Group、Layer）：content bounds 为本地坐标系中 [0, width] × [0, height] 的逻辑框。对 Polystar，框为 [0, outerRadius×2] × [0, outerRadius×2]。`left="0"` 将框的左边缘对齐到容器左边缘。
+- **像素对齐节点**（Path、Text、TextPath）：content bounds 为实际渲染像素边界。`left="0"` 将内容平移使渲染像素紧贴容器边缘。对 Text，content bounds 为行盒边界（字形推进宽度之和 × 字体指标行高），提供不依赖于具体字形形状的稳定测量。
+
+两种方式确保了 `left="0"` 对所有元素的语义一致：「内容紧贴容器边缘」。对框对齐节点指逻辑框，对像素对齐节点指渲染像素。
+
+#### position 属性
+
+所有图层内容节点拥有 `position` 属性，表示元素锚点在父坐标系中的绝对坐标。约束定位的计算结果写入 `position`。各元素的锚点位置不同：
+
+| 元素 | 锚点位置 | 说明 |
+|------|---------|------|
+| Rectangle、Ellipse | 几何中心 | 默认为 `(size.width/2, size.height/2)`，使左上角对齐原点 |
+| Polystar | 几何中心 | 默认为 `(-bounds.x, -bounds.y)`，使像素左上角对齐原点 |
+| Path、TextPath | 坐标系原点 | `position="0,0"` 时路径数据坐标直接作为绘制坐标 |
+| Text | 由 `textAnchor` 决定 | `start`：基线起点；`center`：水平中点；`end`：末尾 |
+| Group、TextBox | 左上角 | `position="0,0"` 时内容从原点开始 |
+
+#### 单边与居中约束
+
+单边约束将元素的对应边缘定位到距容器边缘指定距离处；居中约束将元素中心定位到容器中心加偏移量处。都不改变元素尺寸。
+
+```
+left=L:     tx = L - B.left
+right=R:    tx = (W - R) - B.right
+centerX=C:  tx = (W/2 + C) - B.centerX
+```
+
+其中 `B` 为元素的 content bounds，`W`/`H` 为容器布局尺寸。垂直轴（`top`/`bottom`/`centerY`）计算方式相同。`centerX="0"` 水平居中，`centerX="20"` 居中后偏右 20px。
+
+> [Sample](samples/constraint_single_edge_center.pagx)
+
+#### 对边约束
+
+同时设置 `left` + `right`（或 `top` + `bottom`）定义一个目标区域（容器尺寸减去两侧间距）。不同节点类型的响应方式：
+
+| 元素 | 对边行为 | 说明 |
+|------|---------|------|
+| Rectangle、Ellipse | 拉伸形状 | 修改 `size` 填满目标区域，改变渲染形状 |
+| TextBox | 拉伸排版区域 | 修改 `width` 和 `height` 填满目标区域，改变文字排版范围 |
+| Group | 推导布局尺寸 | 对齐目标区域并设置布局尺寸，内部子元素按新尺寸重新布局，不影响渲染 |
+| 子 Layer | 推导尺寸 | 始终从父容器推导该维度的尺寸（`width = 父.width - left - right`），覆盖显式 `width`/`height` |
+| Polystar、Path、Text、TextPath | 等比缩放适配 | 单轴对边约束时紧贴该轴边界等比缩放；双轴对边约束时取两轴中较小的缩放因子（fit 模式），在较长轴方向居中 |
+
+**拉伸**（Rectangle、Ellipse、TextBox）：
+
+```
+left=L, right=R:  新 width = W - L - R
+                  Rectangle/Ellipse: position.x = L + width/2（锚点在几何中心）
+                  TextBox: position.x = L（锚点在左上角）
+```
+
+垂直轴同理。
+
+**推导布局尺寸**（Group）：
+
+```
+left=L, right=R:  position.x = L, width = W - L - R
+```
+
+垂直轴同理。
+
+**等比缩放适配**（Polystar、Path、Text、TextPath）：
+
+```
+1. 计算缩放因子（B 为缩放前的 Content Bounds）:
+
+  仅水平对边约束 (left=L, right=R):
+    scale = (W - L - R) / B.width
+    元素宽度恰好铺满目标区域，高度等比跟随缩放。
+
+  仅垂直对边约束 (top=T, bottom=B_):
+    scale = (H - T - B_) / B.height
+    元素高度恰好铺满目标区域，宽度等比跟随缩放。
+
+  双轴对边约束 (left=L, right=R, top=T, bottom=B_):
+    scale = min((W - L - R) / B.width, (H - T - B_) / B.height)
+    fit 模式：取较小的缩放因子，保证两个轴都不超出目标区域。
+
+2. 缩放元素: Path 改写路径数据，Polystar 改写参数值，Text 改写 fontSize
+
+3. 定位（B' 为缩放后的 Content Bounds）:
+
+  有 left+right:
+    tx = L + (W - L - R - B'.width) / 2 - B'.left
+    单轴时 B'.width 恰好等于 W-L-R，居中偏移为零；
+    双轴 fit 时若水平轴为较长轴，则产生居中偏移。
+
+  有 top+bottom:
+    ty = T + (H - T - B_ - B'.height) / 2 - B'.top
+    同理。
+
+  无对边约束的轴按常规单边或居中约束定位。
+```
+
+**拉伸**：
+> [Sample](samples/constraint_opposite_edge_stretch.pagx)
+
+**TextBox 与 Group**：
+> [Sample](samples/constraint_textbox_and_group.pagx)
+
+**等比缩放适配**：
+> [Sample](samples/constraint_polystar_center.pagx)
+
+#### 子 Layer 约束定位
+
+子 Layer 的约束属性覆盖其 `x`/`y`。生效条件：
+
+1. **父 Layer 无容器布局**：`layout` 为 `none`（默认值），或
+2. **子 Layer 脱离布局流**：`includeInLayout="false"`
+
+```xml
+<Layer width="400" height="300">
+  <!-- 对边约束推导宽度：width = 400 - 20 - 20 = 360 -->
+  <Layer left="20" right="20" top="50">
+    <!-- ... -->
+  </Layer>
+  <!-- 居中定位 -->
+  <Layer centerX="0" bottom="20" width="100" height="40">
+    <!-- ... -->
+  </Layer>
+</Layer>
+```
+
+### 4.4 与动画的关系
+
+所有布局相关属性（`width`、`height`、`layout`、`gap`、`padding`、`alignment`、`arrangement`，以及约束属性 `left`、`right`、`top`、`bottom`、`centerX`、`centerY`）在运行时不存在。布局引擎在首次渲染前一次性计算，将结果写入各元素的绝对坐标（`position`、`size`），随后布局属性即被丢弃。
+
+因此，动画无法修改布局属性，而是基于布局计算后的结果叠加视觉变化。例如 `transform`、`alpha` 等渲染属性可以设置关键帧动画，它们作用于布局结果之上，不会触发重新布局。
+
+布局引擎在计算完成后，将所有 Layer 的位置（`x`、`y`）四舍五入到最近的整数像素，内容测量的尺寸向上取整到整数像素，避免亚像素渲染带来的模糊和约束边界处的内容裁剪。
+
+---
+
+## 5. 图层系统（Layer System）
+
+图层（Layer）是 PAGX 内容组织的基本单元。每个 Layer 承担两种角色：作为**容器**，它持有 VectorElement（几何元素、修改器、绘制器）和子 Layer，构成层级结构；作为**效果载体**，样式、滤镜、混合模式和遮罩均在 Layer 级别生效。有关布局机制（尺寸、定位和排列），见 §4。
+
+### 5.1 核心概念
+
+本节介绍图层渲染流程的核心概念。图层内容、图层轮廓、图层背景这三个概念贯穿整个渲染流程，是理解图层样式、滤镜和遮罩如何计算效果的基础。
 
 #### 图层渲染流程
 
@@ -554,27 +853,24 @@ PAGX 文档采用层级结构组织内容：
 2. **下层内容**：渲染 `placement="background"` 的 Fill 和 Stroke
 3. **子图层**：按文档顺序递归渲染所有子图层
 4. **图层样式（上方）**：渲染位于内容上方的图层样式（如内阴影）
-5. **上层内容**：渲染 `placement="foreground"` 的 Fill 和 Stroke
+5. **上层内容**：渲染 `placement="foreground"` 的 Fill 和 Stroke（绘制在子图层之上）
 6. **图层滤镜**：将前面步骤的整体输出作为滤镜链的输入，依次应用所有滤镜
 
 #### 图层内容（Layer Content）
 
-**图层内容**是指图层的下层内容、子图层和上层内容的完整渲染结果。图层样式基于图层内容计算效果。例如，当填充为下层、描边为上层时，描边会绘制在子图层之上，但投影阴影仍然基于包含填充、子图层和描边的完整图层内容计算。
+**图层内容**是指图层的下层内容、子图层和上层内容的完整渲染结果（渲染流程中的步骤 2、3 和 5），不包含图层样式和图层滤镜。
+
+图层样式基于图层内容计算效果。例如，当填充位于下层内容、描边位于上层内容时，描边会绘制在子图层之上，但投影阴影仍然基于包含填充、子图层和描边的完整图层内容计算。
 
 #### 图层轮廓（Layer Contour）
 
-**图层轮廓**用于遮罩和部分图层样式。与正常图层内容相比，图层轮廓有以下区别：
+**图层轮廓**是基于图层内容生成的一个二值（不透明或完全透明）遮罩。与普通图层内容相比，图层轮廓有以下区别：
 
-1. **包含 alpha=0 的几何绘制**：填充透明度完全为 0 的几何形状也会加入轮廓
-2. **纯色填充和渐变填充**：忽略原始填充，替换为不透明白色绘制
-3. **图片填充**：保留原始像素，但将半透明像素转换为完全不透明（完全透明的像素保留）
+1. **包含 alpha=0 的填充**：填充透明度完全为 0 的几何形状也会加入轮廓计算
+2. **纯色填充和渐变填充**：原始颜色替换为不透明白色
+3. **图片填充**：完全透明的像素保留透明；其余像素均转为完全不透明
 
-注意：几何元素必须有绘制器才能参与轮廓，单独的几何元素（Rectangle、Ellipse 等）如果没有对应的 Fill 或 Stroke，则不会参与轮廓计算。
-
-图层轮廓主要用于：
-
-- **图层样式**：部分图层样式需要轮廓作为其中一个输入源
-- **遮罩**：`maskType="contour"` 使用遮罩图层的轮廓进行裁剪
+注意：没有绘制器的几何元素（独立的 Rectangle、Ellipse 等）不参与轮廓计算。
 
 #### 图层背景（Layer Background）
 
@@ -592,11 +888,11 @@ PAGX 文档采用层级结构组织内容：
 - 图层应用了滤镜
 - 图层使用了 3D 变换或投影变换
 
-### 4.2 图层（Layer）
+### 5.2 图层（Layer）
 
 `<Layer>` 是内容和子图层的基本容器。
 
-> [Sample](samples/4.2_layer.pagx)
+> [Sample](samples/layer.pagx)
 
 #### 子元素
 
@@ -619,21 +915,23 @@ Layer 的子元素按类型自动归类为四个集合：
 | `visible` | bool | true | 是否可见 |
 | `alpha` | float | 1 | 透明度 0~1 |
 | `blendMode` | BlendMode | normal | 混合模式 |
-| `x` | float | 0 | X 位置 |
-| `y` | float | 0 | Y 位置 |
+| `x` | float | 0 | X 位置（推荐使用约束属性 `left`） |
+| `y` | float | 0 | Y 位置（推荐使用约束属性 `top`） |
 | `matrix` | Matrix | 单位矩阵 | 2D 变换 "a,b,c,d,tx,ty" |
 | `matrix3D` | Matrix | - | 3D 变换（16 个值，列优先） |
 | `preserve3D` | bool | false | 保持 3D 变换 |
 | `antiAlias` | bool | true | 边缘抗锯齿 |
-| `groupOpacity` | bool | false | 组透明度 |
+| `groupOpacity` | bool | true | 组透明度 |
 | `passThroughBackground` | bool | true | 是否允许背景透传给子图层 |
-| `excludeChildEffectsInLayerStyle` | bool | false | 图层样式是否排除子图层效果 |
 | `scrollRect` | Rect | - | 滚动裁剪区域 "x,y,w,h" |
+| `clipToBounds` | bool | false | 将内容裁剪到图层边界（见 §5.5.2） |
 | `mask` | idref | - | 遮罩图层引用 "@id" |
 | `maskType` | MaskType | alpha | 遮罩类型 |
 | `composition` | idref | - | 合成引用 "@id" |
 
-**groupOpacity**：当值为 `false`（默认）时，图层的 `alpha` 独立应用到每个子元素，重叠的半透明子元素在交叉处可能显得更深。当值为 `true` 时，所有图层内容先合成到离屏缓冲区，再将 `alpha` 整体应用到缓冲区，使整个图层呈现均匀的透明效果。
+**布局和约束属性**：`width`、`height`、`layout`、`gap`、`padding`、`alignment`、`arrangement`、`flex`、`includeInLayout`、`left`、`right`、`top`、`bottom`、`centerX`、`centerY` —— 定义、默认值和用法见 §4。
+
+**groupOpacity**：当值为 `true`（默认）时，所有图层内容先合成到离屏缓冲区，再将 `alpha` 整体应用到缓冲区，使整个图层呈现均匀的透明效果。当值为 `false` 时，图层的 `alpha` 独立应用到每个子元素，重叠的半透明子元素在交叉处可能显得更深。
 
 **preserve3D**：当值为 `false`（默认）时，具有 3D 变换的子图层在合成前会被压平到父级的 2D 平面。当值为 `true` 时，子图层保留其 3D 位置，在共享的 3D 空间中渲染，实现基于深度的交叉和正确的兄弟层 Z 排序。类似于 CSS 的 `transform-style: preserve-3d`。
 
@@ -652,27 +950,30 @@ Layer 的子元素按类型自动归类为四个集合：
 
 **BlendMode**：见 2.9 节混合模式完整表格。
 
-### 4.3 图层样式（Layer Styles）
+### 5.3 图层样式（Layer Styles）
 
 图层样式在图层内容的上方或下方添加视觉效果，不会替换原有内容。
 
 **图层样式的输入源**：
 
-所有图层样式都基于**图层内容**计算效果。在图层样式中，图层内容会自动转换为 **不透明模式**：使用正常的填充方式渲染几何形状，然后将所有半透明像素转换为完全不透明（完全透明的像素保留）。这意味着半透明填充产生的阴影效果与完全不透明填充相同。
+所有图层样式都基于**图层内容**计算效果。计算时，图层内容会被转换为对应的不透明版本：使用正常的填充方式渲染几何形状，然后将所有半透明像素转换为完全不透明（完全透明的像素保留）。这意味着半透明填充产生的阴影效果与完全不透明填充相同。
 
-部分图层样式还会额外使用**图层轮廓**或**图层背景**作为输入（详见各样式说明）。图层轮廓和图层背景的定义参见 4.1 节。
+部分图层样式还会额外使用**图层轮廓**或**图层背景**作为输入（详见各样式说明）。图层轮廓和图层背景的定义参见 5.1 节。
 
-> [Sample](samples/4.3_layer_styles.pagx)
+> [Sample](samples/layer_styles.pagx)
 
 **所有 LayerStyle 共有属性**：
 
 | 属性 | 类型 | 默认值 | 说明 |
 |------|------|--------|------|
 | `blendMode` | BlendMode | normal | 混合模式（见 2.9 节） |
+| `excludeChildEffects` | bool | false | 是否排除子图层效果 |
 
-#### 4.3.1 投影阴影（DropShadowStyle）
+**excludeChildEffects**：当值为 `false`（默认）时，图层样式基于完整的图层内容计算，包含子图层的渲染结果。当值为 `true` 时，子图层的图层样式和图层滤镜不参与该样式的计算，但子图层的基础渲染结果仍然包含在内。
 
-在图层**下方**绘制投影阴影。基于不透明图层内容计算阴影形状。当 `showBehindLayer="false"` 时，额外使用**图层轮廓**作为擦除遮罩挖空被图层遮挡的部分。
+#### 5.3.1 投影阴影（DropShadowStyle）
+
+在图层**下方**绘制投影阴影。基于不透明图层内容计算阴影形状。
 
 | 属性 | 类型 | 默认值 | 说明 |
 |------|------|--------|------|
@@ -693,7 +994,7 @@ Layer 的子元素按类型自动归类为四个集合：
 - `true`：阴影完整显示，包括被图层内容遮挡的部分
 - `false`：阴影被图层内容遮挡的部分会被挖空（使用图层轮廓作为擦除遮罩）
 
-#### 4.3.2 背景模糊（BackgroundBlurStyle）
+#### 5.3.2 背景模糊（BackgroundBlurStyle）
 
 在图层**下方**对图层背景应用模糊效果。基于**图层背景**计算效果，使用不透明图层内容作为遮罩裁剪。
 
@@ -708,7 +1009,7 @@ Layer 的子元素按类型自动归类为四个集合：
 2. 对图层背景应用高斯模糊 `(blurX, blurY)`
 3. 使用不透明图层内容作为遮罩裁剪模糊结果
 
-#### 4.3.3 内阴影（InnerShadowStyle）
+#### 5.3.3 内阴影（InnerShadowStyle）
 
 在图层**上方**绘制内阴影，效果呈现在图层内容之内。基于不透明图层内容计算阴影范围。
 
@@ -726,25 +1027,25 @@ Layer 的子元素按类型自动归类为四个集合：
 3. 使用 `color` 的颜色填充阴影区域
 4. 与不透明图层内容求交集，仅保留内容内部的阴影
 
-### 4.4 图层滤镜（Layer Filters）
+### 5.4 图层滤镜（Layer Filters）
 
 图层滤镜是图层渲染的最后一个环节，所有之前按顺序渲染的结果（包含图层样式）累积起来作为滤镜的输入。滤镜按文档顺序链式应用，每个滤镜的输出作为下一个滤镜的输入。
 
-与图层样式（4.3 节）的关键区别：图层样式在图层内容的上方或下方**独立渲染**视觉效果，而滤镜**修改**图层的整体渲染输出。图层样式先于滤镜应用。
+与图层样式（5.3 节）的关键区别：图层样式在图层内容的上方或下方**独立渲染**视觉效果，而滤镜**修改**图层的整体渲染输出。图层样式先于滤镜应用。
 
-> [Sample](samples/4.4_layer_filters.pagx)
+> [Sample](samples/layer_filters.pagx)
 
-#### 4.4.1 模糊滤镜（BlurFilter）
+#### 5.4.1 模糊滤镜（BlurFilter）
 
 | 属性 | 类型 | 默认值 | 说明 |
 |------|------|--------|------|
-| `blurX` | float | (必填) | X 模糊半径 |
-| `blurY` | float | (必填) | Y 模糊半径 |
+| `blurX` | float | 0 | X 模糊半径 |
+| `blurY` | float | 0 | Y 模糊半径 |
 | `tileMode` | TileMode | decal | 平铺模式 |
 
-#### 4.4.2 投影阴影滤镜（DropShadowFilter）
+#### 5.4.2 投影阴影滤镜（DropShadowFilter）
 
-基于滤镜输入生成阴影效果。与 DropShadowStyle 的核心区别：滤镜基于原始渲染内容投影，支持半透明度；而样式基于不透明图层内容投影。此外两者支持的属性功能也有所不同。
+基于滤镜输入生成阴影效果。与 DropShadowStyle 的核心区别：滤镜基于原始渲染内容投影，支持半透明度；而样式基于不透明图层内容投影。
 
 | 属性 | 类型 | 默认值 | 说明 |
 |------|------|--------|------|
@@ -761,7 +1062,7 @@ Layer 的子元素按类型自动归类为四个集合：
 3. 使用 `color` 的颜色填充阴影区域
 4. 将阴影与滤镜输入合成（`shadowOnly=false`）或仅输出阴影（`shadowOnly=true`）
 
-#### 4.4.3 内阴影滤镜（InnerShadowFilter）
+#### 5.4.3 内阴影滤镜（InnerShadowFilter）
 
 在滤镜输入的内部绘制阴影。
 
@@ -780,7 +1081,7 @@ Layer 的子元素按类型自动归类为四个集合：
 3. 与滤镜输入的 alpha 通道求交集
 4. 将结果与滤镜输入合成（`shadowOnly=false`）或仅输出阴影（`shadowOnly=true`）
 
-#### 4.4.4 混合滤镜（BlendFilter）
+#### 5.4.4 混合滤镜（BlendFilter）
 
 将指定颜色以指定混合模式叠加到图层上。
 
@@ -789,13 +1090,13 @@ Layer 的子元素按类型自动归类为四个集合：
 | `color` | Color | (必填) | 混合颜色 |
 | `blendMode` | BlendMode | normal | 混合模式（见 2.9 节） |
 
-#### 4.4.5 颜色矩阵滤镜（ColorMatrixFilter）
+#### 5.4.5 颜色矩阵滤镜（ColorMatrixFilter）
 
 使用 4×5 颜色矩阵变换颜色。
 
 | 属性 | 类型 | 默认值 | 说明 |
 |------|------|--------|------|
-| `matrix` | Matrix | (必填) | 4x5 颜色矩阵（20 个逗号分隔的浮点数） |
+| `matrix` | Matrix | 单位矩阵 | 4x5 颜色矩阵（20 个逗号分隔的浮点数） |
 
 **矩阵格式**（20 个值，行优先）：
 ```
@@ -806,19 +1107,25 @@ Layer 的子元素按类型自动归类为四个集合：
                                             | 1 |
 ```
 
-### 4.5 裁剪与遮罩（Clipping and Masking）
+### 5.5 裁剪与遮罩（Clipping and Masking）
 
-#### 4.5.1 scrollRect（滚动裁剪）
+#### 5.5.1 scrollRect（滚动裁剪）
 
 `scrollRect` 属性定义图层的可视区域，超出该区域的内容会被裁剪。
 
-> [Sample](samples/4.5.1_scroll_rect.pagx)
+> [Sample](samples/scroll_rect.pagx)
 
-#### 4.5.2 遮罩（Masking）
+#### 5.5.2 clipToBounds
+
+当 `clipToBounds="true"` 时，布局引擎在布局阶段将 `scrollRect="0,0,width,height"` 写入该图层，将内容裁剪到图层自身的边界（`width` × `height`）。此功能与自动布局兼容——裁剪区域在布局引擎解析出图层尺寸之后确定。如果图层同时设置了显式 `scrollRect`，则 `scrollRect` 优先，`clipToBounds` 被忽略。
+
+> [Sample](samples/clip_to_bounds.pagx)
+
+#### 5.5.3 遮罩（Masking）
 
 通过 `mask` 属性引用另一个图层作为遮罩。
 
-> [Sample](samples/4.5.2_masking.pagx)
+> [Sample](samples/masking.pagx)
 
 **遮罩规则**：
 - 遮罩图层自身不渲染（`visible` 属性被忽略）
@@ -826,24 +1133,24 @@ Layer 的子元素按类型自动归类为四个集合：
 
 ---
 
-## 5. 矢量元素系统（VectorElement System）
+## 6. 矢量元素系统（VectorElement System）
 
 矢量元素系统定义了 Layer 内的矢量内容如何被处理和渲染。
 
-### 5.1 处理模型（Processing Model）
+### 6.1 处理模型（Processing Model）
 
 VectorElement 系统采用**累积-渲染**的处理模型：几何元素在渲染上下文中累积，修改器对累积的几何进行变换，绘制器触发最终渲染。
 
-#### 5.1.1 术语定义
+#### 6.1.1 术语定义
 
 | 术语 | 包含元素 | 说明 |
 |------|----------|------|
 | **几何元素** | Rectangle、Ellipse、Polystar、Path、Text | 提供几何形状的元素，在上下文中累积为几何列表 |
-| **修改器** | TrimPath、RoundCorner、MergePath、TextModifier、TextPath、TextLayout、Repeater | 对累积的几何进行变换 |
+| **修改器** | TrimPath、RoundCorner、MergePath、TextModifier、TextPath、TextBox、Repeater | 对累积的几何进行变换 |
 | **绘制器** | Fill、Stroke | 对累积的几何进行填充或描边渲染 |
 | **容器** | Group | 创建独立作用域并应用矩阵变换，处理完成后合并 |
 
-#### 5.1.2 几何元素的内部结构
+#### 6.1.2 几何元素的内部结构
 
 几何元素在上下文中累积时，内部结构有所不同：
 
@@ -852,13 +1159,13 @@ VectorElement 系统采用**累积-渲染**的处理模型：几何元素在渲�
 | 形状元素（Rectangle、Ellipse、Polystar、Path） | 单个 Path | 每个形状元素产生一个路径 |
 | 文本元素（Text） | 字形列表 | 一个 Text 经过塑形后产生多个字形 |
 
-#### 5.1.3 处理与渲染顺序
+#### 6.1.3 处理与渲染顺序
 
 VectorElement 按**文档顺序**依次处理，文档中靠前的元素先处理。默认情况下，先处理的绘制器先渲染（位于下方）。
 
 由于 Fill 和 Stroke 可通过 `placement` 属性指定渲染到图层的背景或前景，因此最终渲染顺序可能与文档顺序不完全一致。但在默认情况下（所有内容均为背景），渲染顺序与文档顺序一致。
 
-#### 5.1.4 统一处理流程
+#### 6.1.4 统一处理流程
 
 ```
 几何元素                修改器                  绘制器
@@ -868,7 +1175,7 @@ VectorElement 按**文档顺序**依次处理，文档中靠前的元素先处�
 │ Polystar │          │MergePath │          └────┬─────┘
 │   Path   │          │TextModif │               │
 │   Text   │          │ TextPath │               │
-└────┬─────┘          │TextLayout│               │
+└────┬─────┘          │TextBox   │               │
      │                │ Repeater │               │
      │                └────┬─────┘               │
      │                     │                     │
@@ -883,41 +1190,43 @@ VectorElement 按**文档顺序**依次处理，文档中靠前的元素先处�
 - 每个形状元素贡献一个 Path
 - 每个 Text 贡献一个字形列表（包含多个字形）
 
-#### 5.1.5 修改器的作用范围
+#### 6.1.5 修改器的作用范围
 
 不同修改器对几何列表中的元素有不同的作用范围：
 
 | 修改器类型 | 作用对象 | 说明 |
 |------------|----------|------|
 | 形状修改器（TrimPath、RoundCorner、MergePath） | 仅 Path | 对文本触发强制转换 |
-| 文本修改器（TextModifier、TextPath、TextLayout） | 仅字形列表 | 对 Path 无效 |
+| 文本修改器（TextModifier、TextPath、TextBox） | 仅字形列表 | 对 Path 无效 |
 | 复制器（Repeater） | Path + 字形列表 | 同时作用于所有几何 |
 
-### 5.2 几何元素（Geometry Elements）
+### 6.2 几何元素（Geometry Elements）
 
-几何元素提供可渲染的形状。
+几何元素提供可渲染的形状。所有几何元素以及 TextPath、TextBox 和 Group 都支持约束属性（`left`、`right`、`top`、`bottom`、`centerX`、`centerY`）用于容器内定位——定义和行为见 §4.3。各元素属性表中不再重复列出约束属性。
 
-#### 5.2.1 矩形（Rectangle）
+#### 6.2.1 矩形（Rectangle）
 
 矩形从中心点定义，支持统一圆角。
 
 ```xml
-<Rectangle center="100,100" size="200,150" roundness="10" reversed="false"/>
+<Rectangle size="200,150" roundness="10" reversed="false"/>
 ```
 
 | 属性 | 类型 | 默认值 | 说明 |
 |------|------|--------|------|
-| `center` | Point | 0,0 | 中心点 |
-| `size` | Size | 100,100 | 尺寸 "width,height" |
+| `position` | Point | (bounding box 中心) | 中心点坐标，设置约束属性时由约束系统自动计算。未设置时默认为 `(size.width/2, size.height/2)`，使左上角对齐原点。推荐使用约束属性（`left`/`top`）进行定位 |
+| `size` | Size | 0,0 | 尺寸 "width,height" |
 | `roundness` | float | 0 | 圆角半径 |
 | `reversed` | bool | false | 反转路径方向 |
 
+矩形支持所有约束属性（见 §4.1）。
+
 **计算规则**：
 ```
-rect.left   = center.x - size.width / 2
-rect.top    = center.y - size.height / 2
-rect.right  = center.x + size.width / 2
-rect.bottom = center.y + size.height / 2
+rect.left   = position.x - size.width / 2
+rect.top    = position.y - size.height / 2
+rect.right  = position.x + size.width / 2
+rect.bottom = position.y + size.height / 2
 ```
 
 **圆角处理**：
@@ -926,49 +1235,51 @@ rect.bottom = center.y + size.height / 2
 
 **示例**:
 
-> [Sample](samples/5.2.1_rectangle.pagx)
+> [Sample](samples/rectangle.pagx)
 
 **路径起点**：矩形路径从**右上角**开始，顺时针方向绘制（`reversed="false"` 时）。
 
-#### 5.2.2 椭圆（Ellipse）
+#### 6.2.2 椭圆（Ellipse）
 
 椭圆从中心点定义。
 
 ```xml
-<Ellipse center="100,100" size="100,60" reversed="false"/>
+<Ellipse size="100,60" reversed="false"/>
 ```
 
 | 属性 | 类型 | 默认值 | 说明 |
 |------|------|--------|------|
-| `center` | Point | 0,0 | 中心点 |
-| `size` | Size | 100,100 | 尺寸 "width,height" |
+| `position` | Point | (bounding box 中心) | 中心点坐标，设置约束属性时由约束系统自动计算。未设置时默认为 `(size.width/2, size.height/2)`，使左上角对齐原点。推荐使用约束属性（`left`/`top`）进行定位 |
+| `size` | Size | 0,0 | 尺寸 "width,height" |
 | `reversed` | bool | false | 反转路径方向 |
+
+椭圆支持所有约束属性（见 §4.1）。
 
 **计算规则**：
 ```
-boundingRect.left   = center.x - size.width / 2
-boundingRect.top    = center.y - size.height / 2
-boundingRect.right  = center.x + size.width / 2
-boundingRect.bottom = center.y + size.height / 2
+boundingRect.left   = position.x - size.width / 2
+boundingRect.top    = position.y - size.height / 2
+boundingRect.right  = position.x + size.width / 2
+boundingRect.bottom = position.y + size.height / 2
 ```
 
 **示例**:
 
-> [Sample](samples/5.2.2_ellipse.pagx)
+> [Sample](samples/ellipse.pagx)
 
 **路径起点**：椭圆路径从**右侧中点**（3 点钟方向）开始。
 
-#### 5.2.3 多边形/星形（Polystar）
+#### 6.2.3 多边形/星形（Polystar）
 
 支持正多边形和星形两种模式。
 
 ```xml
-<Polystar center="100,100" type="star" pointCount="5" outerRadius="100" innerRadius="50" rotation="0" outerRoundness="0" innerRoundness="0" reversed="false"/>
+<Polystar type="star" pointCount="5" outerRadius="100" innerRadius="50" rotation="0" outerRoundness="0" innerRoundness="0" reversed="false"/>
 ```
 
 | 属性 | 类型 | 默认值 | 说明 |
 |------|------|--------|------|
-| `center` | Point | 0,0 | 中心点 |
+| `position` | Point | (-bounds.x, -bounds.y) | 中心点坐标，设置约束属性时由约束系统自动计算。未设置时默认为像素边界框原点的负值，使像素左上角对齐原点。推荐使用约束属性（`left`/`top`）进行定位 |
 | `type` | PolystarType | star | 类型（见下方） |
 | `pointCount` | float | 5 | 顶点数（支持小数） |
 | `outerRadius` | float | 100 | 外半径 |
@@ -997,8 +1308,8 @@ boundingRect.bottom = center.y + size.height / 2
 **顶点计算**（第 i 个外顶点）：
 ```
 angle = rotation + (i / pointCount) * 360°
-x = center.x + outerRadius * cos(angle)
-y = center.y + outerRadius * sin(angle)
+x = position.x + outerRadius * cos(angle)
+y = position.y + outerRadius * sin(angle)
 ```
 
 **小数点数**：
@@ -1013,9 +1324,9 @@ y = center.y + outerRadius * sin(angle)
 
 **示例**:
 
-> [Sample](samples/5.2.3_polystar.pagx)
+> [Sample](samples/polystar.pagx)
 
-#### 5.2.4 路径（Path）
+#### 6.2.4 路径（Path）
 
 使用 SVG 路径语法定义任意形状，支持内联数据或引用 Resources 中定义的 PathData。
 
@@ -1030,29 +1341,33 @@ y = center.y + outerRadius * sin(angle)
 | 属性 | 类型 | 默认值 | 说明 |
 |------|------|--------|------|
 | `data` | string/idref | (必填) | SVG 路径数据或 PathData 资源引用 "@id" |
+| `position` | Point | 0,0 | 路径坐标系原点的偏移。推荐使用约束属性（`left`/`top`）进行定位 |
 | `reversed` | bool | false | 反转路径方向 |
 
 **示例**:
 
-> [Sample](samples/5.2.4_path.pagx)
+> [Sample](samples/path.pagx)
 
-#### 5.2.5 文本（Text）
+#### 6.2.5 文本（Text）
 
 文本元素提供文本内容的几何形状。与形状元素产生单一 Path 不同，Text 经过塑形后会产生**字形列表**（多个字形）并累积到渲染上下文的几何列表中，供后续修改器变换或绘制器渲染。
 
 ```xml
-<Text text="Hello World" position="100,200" fontFamily="Arial" fontStyle="Bold" fontSize="24" letterSpacing="0" baselineShift="0"/>
+<Text text="Hello World" left="100" top="200" fontFamily="Arial" fontStyle="Regular" fauxBold="true" fauxItalic="false" fontSize="24" letterSpacing="0" textAnchor="start"/>
 ```
 
 | 属性 | 类型 | 默认值 | 说明 |
 |------|------|--------|------|
 | `text` | string | "" | 文本内容 |
-| `position` | Point | 0,0 | 文本起点位置，y 为基线（可被 TextLayout 覆盖） |
-| `fontFamily` | string | 系统默认 | 字体族 |
-| `fontStyle` | string | "Regular" | 字体变体（Regular, Bold, Italic, Bold Italic 等） |
+| `position` | Point | 0,0 | 文本起点位置（y 为基线），设置约束属性时由约束系统自动计算。推荐使用约束属性（`left`/`top`）进行定位 |
+| `fontFamily` | string | "" | 字体族（空字符串表示系统默认字体） |
+| `fontStyle` | string | "" | 字体变体（Regular, Bold, Italic, Bold Italic 等）。空字符串表示该字体的默认变体 |
 | `fontSize` | float | 12 | 字号 |
 | `letterSpacing` | float | 0 | 字间距 |
-| `baselineShift` | float | 0 | 基线偏移（正值上移，负值下移） |
+| `fauxBold` | bool | false | 仿粗体效果 |
+| `fauxItalic` | bool | false | 仿斜体效果 |
+| `baseline` | TextBaseline | lineBox | 垂直定位基线模式。`lineBox`：position.y 是 linebox 顶部（基于字体指标行高）；`alphabetic`：position.y 是字母基线 |
+| `textAnchor` | TextAnchor | start | 文本锚点对齐——控制文本相对原点的位置（见下方）。有 TextBox 排版时忽略 |
 
 子元素：`CDATA` 文本、`GlyphRun`*
 
@@ -1075,19 +1390,40 @@ Line 3]]>
 
 **渲染模式**：Text 支持**预排版**和**运行时排版**两种模式。预排版通过 GlyphRun 子节点提供预计算的字形和位置，使用嵌入字体渲染，确保跨平台完全一致。运行时排版在运行时进行塑形和排版，因各平台字体和排版特性差异，可能存在细微不一致。如需精确还原设计工具的排版效果，建议使用预排版。
 
+**TextAnchor（文本锚点对齐）**：
+
+控制文本相对其原点的定位方式。
+
+| 值 | 说明 |
+|------|------|
+| `start` | 原点位于文本起始位置，不做偏移 |
+| `center` | 原点位于文本中心位置，文本偏移半个宽度使其居中于原点 |
+| `end` | 原点位于文本结束位置，文本偏移整个宽度使其终点对齐原点 |
+
+**TextBaseline（基线模式）**：
+
+控制 `position.y` 在垂直定位中的解释方式。
+
+| 值 | 说明 |
+|------|------|
+| `lineBox` | `position.y` 是 linebox 顶部（基于字体指标行高）（默认值） |
+| `alphabetic` | `position.y` 是字母基线。文本直接在基线位置渲染 |
+
 **运行时排版渲染流程**：
 1. 根据 `fontFamily` 和 `fontStyle` 查找系统字体，不可用时按运行时配置的回退列表选择替代字体
-2. 使用 `text` 属性（或 CDATA 子节点）进行塑形，换行符触发换行（默认 1.2 倍字号行高，可通过 TextLayout 自定义）
-3. 应用 `fontSize`、`letterSpacing`、`baselineShift` 等排版参数
+2. 使用 `text` 属性（或 CDATA 子节点）进行塑形，换行符触发换行（默认行高取自字体指标：ascent + descent + leading，可通过 TextBox 自定义）
+3. 应用 `fontSize`、`letterSpacing` 等排版参数
 4. 构造字形列表累积到渲染上下文
 
 **运行时排版示例**：
 
-> [Sample](samples/5.2.5_text.pagx)
+> [Sample](samples/text.pagx)
 
 ##### 预排版数据（GlyphRun）
 
 GlyphRun 定义一组字形的预排版数据，每个 GlyphRun 独立引用一个字体资源。
+
+**坐标系**：GlyphRun 的位置属性（`x`、`y`、`xOffsets`、`positions`）使用**排版坐标系** —— 对于 TextBox 内的 Text，坐标相对于 TextBox 原点；对于独立 Text，坐标相对于 Text 自身原点。渲染时，引擎会应用相应的逆变换将排版坐标转换回 Text 本地坐标。
 
 | 属性 | 类型 | 默认值 | 说明 |
 |------|------|--------|------|
@@ -1102,6 +1438,7 @@ GlyphRun 定义一组字形的预排版数据，每个 GlyphRun 独立引用一�
 | `scales` | string | - | 每字形缩放 (sx,sy)，分号分隔。缩放围绕锚点进行。默认 1,1 |
 | `rotations` | string | - | 每字形旋转角度（度），逗号分隔。旋转围绕锚点进行。默认 0 |
 | `skews` | string | - | 每字形斜切角度（度），逗号分隔。斜切围绕锚点进行。默认 0 |
+| `bounds` | string | - | 行框边界（x,y,w,h），在字体嵌入时计算。用于原始字体指标不可用时的布局测量 |
 
 所有属性均为可选，可任意组合使用。当属性数组长度小于字形数量时，缺失的值使用默认值。
 
@@ -1134,17 +1471,17 @@ finalY[i] = y + positions[i].y
 
 **预排版示例**：
 
-> [Sample](samples/5.2.5_glyph_run.pagx)
+> [Sample](samples/glyph_run.pagx)
 
-### 5.3 绘制器（Painters）
+### 6.3 绘制器（Painters）
 
 绘制器（Fill、Stroke）对**当前时刻**累积的所有几何（Path 和字形列表）进行渲染。
 
-#### 5.3.1 填充（Fill）
+#### 6.3.1 填充（Fill）
 
 填充使用指定的颜色源绘制几何的内部区域。
 
-> [Sample](samples/5.3.1_fill.pagx)
+> [Sample](samples/fill.pagx)
 
 | 属性 | 类型 | 默认值 | 说明 |
 |------|------|--------|------|
@@ -1152,7 +1489,7 @@ finalY[i] = y + positions[i].y
 | `alpha` | float | 1 | 透明度 0~1 |
 | `blendMode` | BlendMode | normal | 混合模式（见 2.9 节） |
 | `fillRule` | FillRule | winding | 填充规则（见下方） |
-| `placement` | LayerPlacement | background | 绘制位置（见 5.3.3 节） |
+| `placement` | LayerPlacement | background | 绘制位置（见 6.3.3 节） |
 
 子元素：可内嵌一个颜色源（SolidColor、LinearGradient、RadialGradient、ConicGradient、DiamondGradient、ImagePattern）
 
@@ -1168,11 +1505,11 @@ finalY[i] = y + positions[i].y
 - 支持通过 TextModifier 对单个字形应用颜色覆盖
 - 颜色覆盖采用 alpha 混合：`finalColor = lerp(originalColor, overrideColor, overrideAlpha)`
 
-#### 5.3.2 描边（Stroke）
+#### 6.3.2 描边（Stroke）
 
 描边沿几何边界绘制线条。
 
-> [Sample](samples/5.3.2_stroke.pagx)
+> [Sample](samples/stroke.pagx)
 
 | 属性 | 类型 | 默认值 | 说明 |
 |------|------|--------|------|
@@ -1187,7 +1524,7 @@ finalY[i] = y + positions[i].y
 | `dashOffset` | float | 0 | 虚线偏移 |
 | `dashAdaptive` | bool | false | 等长虚线段缩放 |
 | `align` | StrokeAlign | center | 描边对齐（见下方） |
-| `placement` | LayerPlacement | background | 绘制位置（见 5.3.3 节） |
+| `placement` | LayerPlacement | background | 绘制位置（见 6.3.3 节） |
 
 **LineCap（线帽样式）**：
 
@@ -1222,7 +1559,7 @@ finalY[i] = y + positions[i].y
 - `dashOffset`：虚线起始偏移量
 - `dashAdaptive`：为 true 时，缩放虚线间隔使各虚线段保持等长
 
-#### 5.3.3 绘制位置（LayerPlacement）
+#### 6.3.3 绘制位置（LayerPlacement）
 
 Fill 和 Stroke 的 `placement` 属性控制相对于子图层的绘制顺序：
 
@@ -1231,11 +1568,11 @@ Fill 和 Stroke 的 `placement` 属性控制相对于子图层的绘制顺序：
 | `background` | 在子图层**下方**绘制（默认） |
 | `foreground` | 在子图层**上方**绘制 |
 
-### 5.4 形状修改器（Shape Modifiers）
+### 6.4 形状修改器（Shape Modifiers）
 
 形状修改器对累积的 Path 进行**原地变换**，对字形列表则触发强制转换为 Path。
 
-#### 5.4.1 路径裁剪（TrimPath）
+#### 6.4.1 路径裁剪（TrimPath）
 
 裁剪路径到指定的起止范围。
 
@@ -1262,9 +1599,9 @@ Fill 和 Stroke 的 `placement` 属性控制相对于子图层的绘制顺序：
 - 支持环绕：当裁剪范围超出 [0,1] 时，自动环绕到路径另一端
 - 路径总长度为 0 时，不执行任何操作
 
-> [Sample](samples/5.4.1_trim_path.pagx)
+> [Sample](samples/trim_path.pagx)
 
-#### 5.4.2 圆角（RoundCorner）
+#### 6.4.2 圆角（RoundCorner）
 
 将路径的尖角转换为圆角。
 
@@ -1283,9 +1620,9 @@ Fill 和 Stroke 的 `placement` 属性控制相对于子图层的绘制顺序：
 
 **示例**:
 
-> [Sample](samples/5.4.2_round_corner.pagx)
+> [Sample](samples/round_corner.pagx)
 
-#### 5.4.3 路径合并（MergePath）
+#### 6.4.3 路径合并（MergePath）
 
 将所有形状合并为单个形状。
 
@@ -1295,9 +1632,9 @@ Fill 和 Stroke 的 `placement` 属性控制相对于子图层的绘制顺序：
 
 | 属性 | 类型 | 默认值 | 说明 |
 |------|------|--------|------|
-| `mode` | MergePathOp | append | 合并操作（见下方） |
+| `mode` | MergePathMode | append | 合并操作（见下方） |
 
-**MergePathOp（路径合并操作）**：
+**MergePathMode（路径合并操作）**：
 
 | 值 | 说明 |
 |------|------|
@@ -1314,27 +1651,26 @@ Fill 和 Stroke 的 `placement` 属性控制相对于子图层的绘制顺序：
 
 **示例**：
 
-> [Sample](samples/5.4.3_merge_path.pagx)
+> [Sample](samples/merge_path.pagx)
 
-### 5.5 文本修改器（Text Modifiers）
+### 6.5 文本修改器（Text Modifiers）
 
 文本修改器对文本中的独立字形进行变换。
 
-#### 5.5.1 文本修改器处理
+#### 6.5.1 文本修改器处理
 
 遇到文本修改器时，上下文中累积的**所有字形列表**会汇总为一个统一的字形列表进行操作：
 
 ```xml
-<Group>
+<TextBox left="100" top="50" width="200" height="100" textAlign="center">
   <Text text="Hello " fontFamily="Arial" fontSize="24"/>
   <Text text="World" fontFamily="Arial" fontSize="24"/>
   <TextModifier position="0,-5"/>
-  <TextLayout position="100,50" textAlign="center"/>
   <Fill color="#333333"/>
-</Group>
+</TextBox>
 ```
 
-#### 5.5.2 文本转形状
+#### 6.5.2 文本转形状
 
 当文本遇到形状修改器时，会强制转换为形状路径：
 
@@ -1379,7 +1715,7 @@ Fill 和 Stroke 的 `placement` 属性控制相对于子图层的绘制顺序：
 </Group>
 ```
 
-#### 5.5.3 文本变换器（TextModifier）
+#### 6.5.3 文本变换器（TextModifier）
 
 对选定范围内的字形应用变换和样式覆盖。TextModifier 可包含多个 RangeSelector 子元素，用于定义不同的选择范围和影响因子。
 
@@ -1405,16 +1741,14 @@ Fill 和 Stroke 的 `placement` 属性控制相对于子图层的绘制顺序：
 
 **选择器计算**：
 1. 根据 RangeSelector 的 `start`、`end`、`offset` 计算选择范围（支持任意小数值，超出 [0,1] 范围时自动环绕）
-2. 根据 `shape` 计算每个字形的影响因子（0~1）
-3. 多个选择器按 `mode` 组合
+2. 根据 `shape` 计算每个字形的原始影响值（0~1），然后乘以 `weight`
+3. 多个选择器按 `mode` 组合，组合结果限制到 [-1, 1]
+
+```
+factor = clamp(combine(rawInfluence₁ × weight₁, rawInfluence₂ × weight₂, ...), -1, 1)
+```
 
 **变换应用**：
-
-选择器计算出的 `factor` 范围为 [-1, 1]，控制变换属性的应用程度：
-
-```
-factor = clamp(selectorFactor × weight, -1, 1)
-```
 
 位置和旋转线性应用 factor。变换按以下顺序应用：
 
@@ -1443,9 +1777,9 @@ finalColor = blend(originalColor, overrideColor, blendFactor)
 
 **示例**：
 
-> [Sample](samples/5.5.3_text_modifier.pagx)
+> [Sample](samples/text_modifier.pagx)
 
-#### 5.5.4 范围选择器（RangeSelector）
+#### 6.5.4 范围选择器（RangeSelector）
 
 范围选择器定义 TextModifier 影响的字形范围和影响程度。
 
@@ -1489,20 +1823,20 @@ finalColor = blend(originalColor, overrideColor, blendFactor)
 
 | 值 | 说明 |
 |------|------|
-| `add` | 相加：累加选择器权重 |
-| `subtract` | 相减：减去选择器权重 |
-| `intersect` | 交集：使用选择器范围的交集 |
-| `min` | 最小：取选择器值的最小值 |
-| `max` | 最大：取最大值 |
-| `difference` | 差值：取绝对差值 |
+| `add` | 相加：`result = a + b` |
+| `subtract` | 相减：`result = b ≥ 0 ? a × (1 − b) : a × (−1 − b)` |
+| `intersect` | 交集：`result = a × b` |
+| `min` | 最小：`result = min(a, b)` |
+| `max` | 最大：`result = max(a, b)` |
+| `difference` | 差值：`result = |a − b|` |
 
-#### 5.5.5 文本路径（TextPath）
+#### 6.5.5 路径文本（TextPath）
 
 将文本沿指定路径排列。路径可以通过引用 Resources 中定义的 PathData，也可以内联路径数据。TextPath 使用
 基线（由 baselineOrigin 和 baselineAngle 定义的直线）作为文本的参考线：字形从基线上的位置映射到路径曲线上
 的对应位置，保持相对间距和偏移。当 forceAlignment 启用时，忽略原始字形位置，将字形均匀分布以填满可用路径长度。
 
-> [Sample](samples/5.5.5_text_path.pagx)
+> [Sample](samples/text_path.pagx)
 
 | 属性 | 类型 | 默认值 | 说明 |
 |------|------|--------|------|
@@ -1534,43 +1868,47 @@ finalColor = blend(originalColor, overrideColor, blendFactor)
 
 **闭合路径**：对于闭合路径，超出范围的字形会环绕到路径另一端。
 
-#### 5.5.6 文本排版（TextLayout）
+#### 6.5.6 文本框（TextBox）
 
-TextLayout 是文本排版修改器，对累积的 Text 元素应用排版，会覆盖 Text 元素的原始位置（类似 TextPath 覆盖位置的行为）。支持两种模式：
+TextBox 是文本框排版器，对其内部的 Text 元素应用排版。它根据自身的排版尺寸（`width`/`height`）和对齐设置重新排版所有字形位置，排版结果通过反向变换补偿写入每个 Text 元素的 GlyphRun 数据，因此 Text 自身的 position 和父级 Group 变换在渲染管线中仍然有效。首行使用行框模型定位：行框近端贴齐文本区域近端边缘，基线位于近端下方 `halfLeading + ascent` 处，其中 `halfLeading = (lineHeight - metricsHeight) / 2`，`metricsHeight = ascent + descent + leading`。遵循 CSS Writing Modes 的惯例，`lineHeight` 是逻辑属性，始终作用于行框的块轴方向尺寸。竖排模式下，它控制的是列宽而非行高。列间距为 `lineHeight`（中心到中心的距离）。当 `lineHeight` 为 0（自动）时，列宽根据字体 metrics 计算（ascent + descent + leading），与横排自动行高的算法一致。列从右往左排列。
 
-- **点文本模式**（无 width）：文本不自动换行，textAlign 控制文本相对于 (x, y) 锚点的对齐
-- **段落文本模式**（有 width）：文本在指定宽度内自动换行
+TextBox 是**仅参与预排版**的节点：它在渲染前的排版阶段被处理，不会在渲染树中实例化。如果内部所有 Text 元素都已包含嵌入的 GlyphRun 数据，则排版阶段会跳过 TextBox。但即使已填写嵌入的 GlyphRun 数据和字体，仍建议保留 TextBox 节点，因为设计工具导入时需要读取其排版属性（`width`、`height`、`textAlign`、`paragraphAlign`、`lineHeight`、`wordWrap`、`overflow` 等）用于编辑展示。
 
-渲染时会由附加的文字排版模块预先排版，重新计算每个字形的位置。TextLayout 会被预排版展开，字形位置直接写入 Text。
+作为容器，TextBox 在独立的作用域中处理其内部的 Text 元素和文本修改器（TextModifier、TextPath 等）。TextBox 内的 Text 元素首先按 TextBox 的排版设置完成排版；TextBox 内的后续文本修改器在排版结果的基础上工作。TextBox 只影响 Text 元素的**初始排版**——它在文本修改器链开始之前确定字形位置。
 
-> [Sample](samples/5.5.6_text_layout.pagx)
+> [Sample](samples/text_box.pagx)
 
 | 属性 | 类型 | 默认值 | 说明 |
 |------|------|--------|------|
-| `position` | Point | 0,0 | 排版原点 |
-| `width` | float | auto | 排版宽度（有值则自动换行） |
-| `height` | float | auto | 排版高度（有值则启用垂直对齐） |
-| `textAlign` | TextAlign | start | 水平对齐（见下方） |
-| `verticalAlign` | VerticalAlign | top | 垂直对齐（见下方） |
+| `width` | float | NaN | 排版宽度。NaN 表示该维度上无边界，可能导致 wordWrap 或 overflow 无效果 |
+| `height` | float | NaN | 排版高度。NaN 表示该维度上无边界，可能导致 wordWrap 或 overflow 无效果 |
+| `textAlign` | TextAlign | start | 文本对齐——沿行内方向对齐文本（见下方） |
+| `paragraphAlign` | ParagraphAlign | near | 段落对齐——沿块流方向对齐文本行/列（见下方） |
 | `writingMode` | WritingMode | horizontal | 排版方向（见下方） |
-| `lineHeight` | float | 1.2 | 行高倍数 |
+| `lineHeight` | float | 0 | 行高（像素值）。0 表示自动（根据字体 metrics 计算：ascent + descent + leading）。遵循 CSS Writing Modes 的逻辑属性惯例，竖排模式下控制列宽 |
+| `wordWrap` | bool | true | 是否启用自动换行，在盒子宽度边界（横排）或高度边界（竖排）处换行。当该维度为 NaN 时无效果 |
+| `overflow` | Overflow | visible | 文本超出盒子高度（横排）或宽度（竖排）时的溢出行为。当该维度为 NaN 时无效果 |
 
-**TextAlign（水平对齐）**：
+TextBox 继承 Group 的所有属性（`position`、`anchor`、`rotation`、`scale`、`skew`、`skewAxis`、`alpha`、`padding`）和约束属性（见 §4.1）。`padding` 属性内缩文本排版区域和非 Text 子元素的约束参考系。`position` 属性指定文本区域左上角在父坐标系中的坐标。推荐使用约束属性（`left`/`top`）进行定位——设置约束属性时，`position` 由约束系统自动计算。
+
+**TextAlign（文本对齐）**：
 
 | 值 | 说明 |
 |------|------|
-| `start` | 起始对齐（左对齐，对于 RTL 文本为右对齐） |
+| `start` | 起始对齐 |
 | `center` | 居中对齐 |
-| `end` | 结束对齐（右对齐，对于 RTL 文本为左对齐） |
+| `end` | 结束对齐 |
 | `justify` | 两端对齐（最后一行起始对齐） |
 
-**VerticalAlign（垂直对齐）**：
+**ParagraphAlign（段落对齐）**：
+
+沿块流方向（block-flow direction）对齐文本行或列。使用方向中立的 Near/Far 而非 Top/Bottom，在横排和竖排模式下语义一致。横排模式下控制垂直定位，竖排模式下控制水平定位。
 
 | 值 | 说明 |
 |------|------|
-| `top` | 顶部对齐 |
-| `center` | 垂直居中 |
-| `bottom` | 底部对齐 |
+| `near` | 近端对齐（横排时为顶部，竖排时为右侧）。使用行框模型，首行行框近端贴齐文本区域近端边缘。基线位于近端下方 `halfLeading + ascent` 处，其中 `halfLeading = (lineHeight - metricsHeight) / 2`。 |
+| `middle` | 居中对齐。整体文本块尺寸（所有行高/列宽之和）在对应维度内居中。 |
+| `far` | 远端对齐（横排时为底部，竖排时为左侧）。末行行框远端对齐文本区域远端边缘。 |
 
 **WritingMode（排版方向）**：
 
@@ -1579,15 +1917,22 @@ TextLayout 是文本排版修改器，对累积的 Text 元素应用排版，会
 | `horizontal` | 横排文本 |
 | `vertical` | 竖排文本（列从右到左排列，传统中日文竖排） |
 
-#### 5.5.7 富文本
+**Overflow（溢出行为）**：
 
-富文本通过 Group 内的多个 Text 元素组合，每个 Text 可以有独立的 Fill/Stroke 样式。使用 TextLayout 进行统一排版。
+| 值 | 说明 |
+|------|------|
+| `visible` | 超出盒子边界的文本仍然渲染（默认） |
+| `hidden` | 超出盒子高度（横排）或宽度（竖排）的整行/整列被丢弃，不会显示被截断的半行/半列。当该维度为 NaN 时无效果 |
 
-> [Sample](samples/5.5.7_rich_text.pagx)
+#### 6.5.7 富文本
 
-**说明**：每个 Group 内的 Text + Fill/Stroke 定义一段样式独立的文本片段，TextLayout 将所有片段作为整体进行排版，实现自动换行和对齐。
+富文本通过 TextBox 内的多个 Text 元素组合，每个 Text 可以包裹在 Group 中拥有独立的 Fill/Stroke 样式。TextBox 提供统一排版。
 
-### 5.6 复制器（Repeater）
+> [Sample](samples/rich_text.pagx)
+
+**说明**：每个 Group 内的 Text + Fill/Stroke 定义一段样式独立的文本片段，TextBox 将所有片段作为子元素进行统一排版，实现自动换行和对齐。
+
+### 6.6 复制器（Repeater）
 
 复制累积的内容和已渲染的样式，对每个副本应用渐进变换。Repeater 对 Path 和字形列表同时生效，且不会触发文本转形状。
 
@@ -1657,23 +2002,28 @@ alpha = lerp(startAlpha, endAlpha, t)
 - **保留文本属性**：字形列表复制后仍保留字形信息，后续文本修改器仍可作用
 - **复制已渲染样式**：同时复制已渲染的填充和描边
 
-> [Sample](samples/5.6_repeater.pagx)
+> [Sample](samples/repeater.pagx)
 
-### 5.7 容器（Group）
+### 6.7 容器（Group）
 
 Group 是带变换属性的矢量元素容器。
 
-> [Sample](samples/5.7_group.pagx)
+> [Sample](samples/group.pagx)
 
 | 属性 | 类型 | 默认值 | 说明 |
 |------|------|--------|------|
 | `anchor` | Point | 0,0 | 锚点 "x,y" |
-| `position` | Point | 0,0 | 位置 "x,y" |
+| `position` | Point | 0,0 | 位置 "x,y"，设置约束属性时由约束系统自动计算。推荐使用约束属性（`left`/`top`）进行定位 |
 | `rotation` | float | 0 | 旋转角度 |
 | `scale` | Point | 1,1 | 缩放 "sx,sy" |
 | `skew` | float | 0 | 倾斜量 |
 | `skewAxis` | float | 0 | 倾斜轴角度 |
 | `alpha` | float | 1 | 透明度 0~1 |
+| `width` | float | - | 布局宽度（见 §4） |
+| `height` | float | - | 布局高度（见 §4） |
+| `padding` | float 或 "t,r,b,l" | 0 | 内缩子元素的约束参考系。支持单值（四边均匀）、两值（垂直,水平）、四值（上,右,下,左） |
+
+Group 支持所有约束属性（见 §4.1）。
 
 #### 变换顺序
 
@@ -1712,28 +2062,97 @@ Group 创建独立的作用域，用于隔离几何累积和渲染：
 - **Layer 是累积终止点**：几何向上累积直到遇到 Layer 边界，不会跨 Layer 传递
 
 **示例 1 - 基本隔离**：
-> [Sample](samples/5.7_group_isolation.pagx)
+> [Sample](samples/group_isolation.pagx)
 
 **示例 2 - 子 Group 几何向上累积**：
-> [Sample](samples/5.7_group_propagation.pagx)
+> [Sample](samples/group_propagation.pagx)
 
 **示例 3 - 多个绘制器复用几何**：
-> [Sample](samples/5.7_multiple_painters.pagx)
+> [Sample](samples/multiple_painters.pagx)
 
 #### 多重填充与描边
 
 由于绘制器不清空几何列表，同一几何可连续应用多个 Fill 和 Stroke。
 
 **示例 4 - 多重填充**：
-> [Sample](samples/5.7_multiple_fills.pagx)
+> [Sample](samples/multiple_fills.pagx)
 
 **示例 5 - 多重描边**：
-> [Sample](samples/5.7_multiple_strokes.pagx)
+> [Sample](samples/multiple_strokes.pagx)
 
 **示例 6 - 混合叠加**：
-> [Sample](samples/5.7_mixed_overlay.pagx)
+> [Sample](samples/mixed_overlay.pagx)
 
 **渲染顺序**：多个绘制器按文档顺序渲染，先出现的位于下方。
+
+---
+
+## 7. 导入指令（Import Directives）
+
+导入指令用于将外部内容（目前支持 SVG）嵌入到 PAGX 文件中。它们**不会被直接渲染** —— 必须通过
+`pagx resolve` 解析为原生 PAGX 节点后，文件才能被渲染或验证。
+
+### 7.1 内联 SVG（Inline SVG）
+
+`<Layer>` 可以直接包含一个 `<svg>` 元素作为子节点。解析器只读取 `<svg>` 根节点，将其视为
+不透明的外部内容 —— `<svg>` 的子节点不会被展开或作为 PAGX 节点验证。
+
+```xml
+<Layer id="shareIcon" centerX="0" centerY="0">
+  <svg viewBox="0 0 24 24">
+    <path d="M4 12v8a2 2 0 002 2h12a2 2 0 002-2v-8" fill="none"
+          stroke="#7F8C8D" stroke-width="1.5" stroke-linecap="round"/>
+    <polyline points="16,6 12,2 8,6" fill="none"
+             stroke="#7F8C8D" stroke-width="1.5" stroke-linecap="round"
+             stroke-linejoin="round"/>
+    <line x1="12" y1="2" x2="12" y2="15" fill="none"
+          stroke="#7F8C8D" stroke-width="1.5" stroke-linecap="round"/>
+  </svg>
+</Layer>
+```
+
+### 7.2 外部导入（External Import）
+
+Layer 的 `import` 属性引用要导入的外部文件。格式从文件扩展名推断。当扩展名不明确时，
+可以使用 `importFormat` 属性显式指定格式。
+
+#### 属性
+
+| 属性 | 类型 | 默认值 | 必需 | 说明 |
+|------|------|--------|------|------|
+| `import` | string | — | 否 | 外部文件路径，相对于 PAGX 文件所在位置。 |
+| `importFormat` | string | — | 否 | 强制指定输入格式（如 `svg`）。省略时从 `import` 文件扩展名推断。 |
+
+```xml
+<Layer id="logoIcon" centerX="0" centerY="0" import="assets/logo.svg"/>
+
+<!-- 扩展名不明确时显式指定格式 -->
+<Layer id="icon" centerX="0" centerY="0" import="assets/drawing.xml" importFormat="svg"/>
+```
+
+### 7.3 解析（Resolution）
+
+`pagx resolve` 命令处理 PAGX 文件中所有导入指令：
+
+1. 对于每个包含内联 `<svg>` 子节点或 `import` 属性的 Layer，读取内容（内联元素或外部文件）
+2. 将 SVG 内容转换为原生 PAGX 节点（如 SVG 元素转为 Rectangle、Ellipse、Path、Fill、Stroke、
+   Group 节点）
+3. 替换 `<svg>` 元素或移除 `import`/`importFormat` 属性，并将转换后的节点插入 Layer 的子节点
+4. 如果 Layer 已显式设置了 `width` 和 `height`，内容将等比缩放以适应这些尺寸（居中，保持宽高比）。
+   如果 Layer 未设置显式尺寸，则从源文件尺寸设置 `width` 和 `height`（如 SVG 的 `viewBox` 或
+   `width`/`height` 属性）
+5. 在 Layer 的子节点中插入注释以标注原始来源：
+   - 内联 SVG：`<!-- Resolved from: inline svg -->`
+   - 外部文件：`<!-- Resolved from: assets/logo.svg -->`
+
+解析完成后，文件仅包含原生 PAGX 节点 —— 不再有 `<svg>` 元素或 `import` 属性。
+
+#### 工具行为
+
+处理 PAGX 文件的工具对未解析的导入指令的处理方式：
+
+- **`pagx verify`**：自动解析所有导入后再进行检查。如果解析失败，报告错误。
+- **`pagx render`**：报告错误 —— `unresolved import`，拒绝渲染。
 
 ---
 
@@ -1743,45 +2162,58 @@ Group 创建独立的作用域，用于隔离几何累积和渲染：
 
 ### A.1 节点分类
 
-| 分类 | 节点 |
-|------|------|
-| **容器** | `pagx`, `Resources`, `Layer`, `Group` |
-| **资源** | `Image`, `PathData`, `Composition`, `Font`, `Glyph` |
-| **颜色源** | `SolidColor`, `LinearGradient`, `RadialGradient`, `ConicGradient`, `DiamondGradient`, `ImagePattern`, `ColorStop` |
-| **图层样式** | `DropShadowStyle`, `InnerShadowStyle`, `BackgroundBlurStyle` |
-| **图层滤镜** | `BlurFilter`, `DropShadowFilter`, `InnerShadowFilter`, `BlendFilter`, `ColorMatrixFilter` |
-| **几何元素** | `Rectangle`, `Ellipse`, `Polystar`, `Path`, `Text`, `GlyphRun` |
-| **修改器** | `TrimPath`, `RoundCorner`, `MergePath`, `TextModifier`, `RangeSelector`, `TextPath`, `TextLayout`, `Repeater` |
-| **绘制器** | `Fill`, `Stroke` |
+| 分类 | 节点 | 说明 |
+|------|------|------|
+| **结构节点** | `pagx`, `Resources` | `pagx`：文档入口（子节点仅限：`<Layer>`、`<Resources>`）。`Resources`：存放可复用定义（Image、PathData、Composition、Font 等） |
+| **内容容器** | `Layer` | 接纳 VectorElement、子 Layer、样式和滤镜。 |
+| **元素容器** | `Group`, `TextBox` | 仅接纳 VectorElement。 |
+| **资源类型** | `Image`, `PathData`, `Composition`, `Font`, `Glyph` | 存储在 `<Resources>` 中的可复用资源。 |
+| **颜色源** | `SolidColor`, `LinearGradient`, `RadialGradient`, `ConicGradient`, `DiamondGradient`, `ImagePattern`, `ColorStop` | 绘制器使用的颜色定义。 |
+| **图层样式** | `DropShadowStyle`, `InnerShadowStyle`, `BackgroundBlurStyle` | 应用于图层内容的视觉效果。 |
+| **图层滤镜** | `BlurFilter`, `DropShadowFilter`, `InnerShadowFilter`, `BlendFilter`, `ColorMatrixFilter` | 应用于合成图层的后期处理效果。 |
+| **几何元素** | `Rectangle`, `Ellipse`, `Polystar`, `Path`, `Text`, `GlyphRun` | 可绘制的形状和文本。必须在 Layer/Group 内。 |
+| **修改器** | `TrimPath`, `RoundCorner`, `MergePath`, `TextModifier`, `RangeSelector`, `TextPath`, `TextBox`, `Repeater` | 变换或组合几何图形和文本。 |
+| **绘制器** | `Fill`, `Stroke` | 对几何图形应用颜色/渐变。必须在 Layer/Group 内。 |
+| **导入指令** | （内联 `<svg>`、`import` 属性） | 导入指令。Layer 的内联 `<svg>` 子元素和 `import`/`importFormat` 属性通过 `pagx resolve` 解析为原生 PAGX 节点。 |
 
 ### A.2 文档包含关系
 
+根节点 `<pagx>` **仅接受 `<Layer>` 和 `<Resources>` 作为直接子节点**。几何元素、绘制器等其他元素必须嵌套在 `<Layer>` 内。
+
 ```
-pagx
-├── Resources
-│   ├── Image
-│   ├── PathData
-│   ├── SolidColor
-│   ├── LinearGradient → ColorStop*
-│   ├── RadialGradient → ColorStop*
-│   ├── ConicGradient → ColorStop*
-│   ├── DiamondGradient → ColorStop*
-│   ├── ImagePattern
-│   ├── Font → Glyph*
-│   └── Composition → Layer*
+pagx（必需属性：width、height）
+├── Layer*                      ← 直接子节点仅能是 Layer
+│   ├── VectorElement*（见 A.3）
+│   ├── <svg>*（导入指令，见 §7）
+│   ├── DropShadowStyle*
+│   ├── InnerShadowStyle*
+│   ├── BackgroundBlurStyle*
+│   ├── BlurFilter*
+│   ├── DropShadowFilter*
+│   ├── InnerShadowFilter*
+│   ├── BlendFilter*
+│   ├── ColorMatrixFilter*
+│   └── Layer*（子图层，递归）
 │
-└── Layer*
-    ├── VectorElement*（见 A.3）
-    ├── DropShadowStyle*
-    ├── InnerShadowStyle*
-    ├── BackgroundBlurStyle*
-    ├── BlurFilter*
-    ├── DropShadowFilter*
-    ├── InnerShadowFilter*
-    ├── BlendFilter*
-    ├── ColorMatrixFilter*
-    └── Layer*（子图层）
+└── Resources（可选，可复用定义）
+    ├── Image
+    ├── PathData
+    ├── SolidColor
+    ├── LinearGradient → ColorStop*
+    ├── RadialGradient → ColorStop*
+    ├── ConicGradient → ColorStop*
+    ├── DiamondGradient → ColorStop*
+    ├── ImagePattern
+    ├── Font → Glyph*
+    └── Composition → Layer*    ← Composition 的根节点子级也仅能是 Layer
 ```
+
+**关键规则**：
+- `<pagx>` 直接子节点：**仅 `<Layer>` 和 `<Resources>`**
+- VectorElement（Rectangle、Ellipse、Path、Text 等）**必须在 `<Layer>` 或 `<Group>` 内**
+- 绘制器（Fill、Stroke）**必须在 `<Layer>` 或 `<Group>` 内**
+- `<Group>` 或几何元素作为 `<pagx>` 直接子节点会导致解析错误
+- `<Composition>` 的根节点子级遵循相同规则：仅允许 `<Layer>`
 
 ### A.3 VectorElement 包含关系
 
@@ -1803,10 +2235,12 @@ Layer / Group
 ├── MergePath
 ├── TextModifier → RangeSelector*
 ├── TextPath
-├── TextLayout
+├── TextBox
 ├── Repeater
 └── Group*（递归）
 ```
+
+此外，`Layer`（不含 `Group`）可包含 `<svg>` 作为导入指令（见 §7）。
 
 ---
 
@@ -1821,6 +2255,9 @@ Layer / Group
 | **TileMode** | `clamp`, `repeat`, `mirror`, `decal` |
 | **FilterMode** | `nearest`, `linear` |
 | **MipmapMode** | `none`, `nearest`, `linear` |
+| **LayoutMode** | `none`, `horizontal`, `vertical` |
+| **Alignment** | `start`, `center`, `end`, `stretch` |
+| **Arrangement** | `start`, `center`, `end`, `spaceBetween`, `spaceEvenly`, `spaceAround` |
 
 ### 绘制器相关
 
@@ -1843,14 +2280,18 @@ Layer / Group
 | 枚举 | 值 |
 |------|------|
 | **TrimType** | `separate`, `continuous` |
-| **MergePathOp** | `append`, `union`, `intersect`, `xor`, `difference` |
+| **MergePathMode** | `append`, `union`, `intersect`, `xor`, `difference` |
 | **SelectorUnit** | `index`, `percentage` |
 | **SelectorShape** | `square`, `rampUp`, `rampDown`, `triangle`, `round`, `smooth` |
 | **SelectorMode** | `add`, `subtract`, `intersect`, `min`, `max`, `difference` |
 | **TextAlign** | `start`, `center`, `end`, `justify` |
-| **VerticalAlign** | `top`, `center`, `bottom` |
+| **TextAnchor** | `start`, `center`, `end` |
+| **TextBaseline** | `lineBox`, `alphabetic` |
+| **ParagraphAlign** | `near`, `middle`, `far` |
 | **WritingMode** | `horizontal`, `vertical` |
 | **RepeaterOrder** | `belowOriginal`, `aboveOriginal` |
+| **Overflow** | `visible`, `hidden` |
+
 ---
 
 ## 附录 C. 常见用法示例（Examples）
@@ -1859,29 +2300,35 @@ Layer / Group
 
 以下示例涵盖 PAGX 的所有主要节点类型，展示完整的文档结构。
 
-> [Sample](samples/C.1_complete_example.pagx)
+> [Sample](samples/complete_example.pagx)
 
-### C.2 RPG 角色面板
+### C.2 应用图标
 
-一个奇幻 RPG 风格的角色状态面板，展示了复杂的 UI 组合，包含嵌套图层、渐变和装饰元素。
+毛玻璃风格的图标网格 — 12 个多色图标位于深色背景上，配合柔和色场和背景模糊卡片。展示了基于 Path 的矢量图标构建、Composition 复用、BackgroundBlurStyle 和 DropShadowStyle。
 
-> [Sample](samples/C.2_rpg_character_panel.pagx)
+> [Sample](samples/app_icons.pagx)
 
 ### C.3 星云学员
 
-一个太空主题的学员资料卡片，展示了星云效果、星空背景和现代 UI 设计模式。
+全屏 UI 面板，包含顶部导航栏、头像、进度条、操作按钮、货币组件和底部 Tab 栏。展示了典型应用界面的布局方式和组件组合。
 
-> [Sample](samples/C.3_nebula_cadet.pagx)
+> [Sample](samples/nebula_cadet.pagx)
 
 ### C.4 游戏 HUD
 
-一个游戏平视显示器（HUD），展示了血条、分数显示和游戏界面元素。
+科幻风格的游戏平视显示器，包含瞄准十字线、弧形生命值和能量仪表、雷达小地图、弹药计数器和任务目标栏。展示了 Repeater 驱动的刻度线、弧形 Stroke 上的 TrimPath、ConicGradient 扫描效果和多层 Mask 叠加。
 
-> [Sample](samples/C.4_game_hud.pagx)
+> [Sample](samples/game_hud.pagx)
 
 ### C.5 PAGX 特性概览
 
-PAGX 格式能力的综合展示，包括渐变、效果、文本样式和矢量图形。
+信息图/演示幻灯片风格的 PAGX 能力介绍 — 中心标题搭配轨道环、五张特性卡片通过虚线连接、底部转换流程条。展示了 TextBox 多行排版、卡片式信息架构和装饰性连接线图形。
 
-> [Sample](samples/C.5_pagx_features.pagx)
+> [Sample](samples/pagx_features.pagx)
+
+### C.6 太空探索者
+
+一幅外星球探险插画，包含宇航员、奇异植物、外星生物和大气效果。展示了复杂场景合成、分层背景、手绘风格 Path 图形、通过超长 Path 数据程序化生成的草地纹理以及丰富的渐变光效。
+
+> [Sample](samples/space_explorer.pagx)
 

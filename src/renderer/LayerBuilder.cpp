@@ -19,10 +19,14 @@
 #include "LayerBuilder.h"
 #include <tuple>
 #include <unordered_map>
-#include "utils/Base64.h"
 #include "ToTGFX.h"
+#include "base/utils/Log.h"
+#include "pagx/PAGXDocument.h"
+#include "pagx/TextLayout.h"
 #include "pagx/nodes/BackgroundBlurStyle.h"
+#include "pagx/nodes/BlendFilter.h"
 #include "pagx/nodes/BlurFilter.h"
+#include "pagx/nodes/ColorMatrixFilter.h"
 #include "pagx/nodes/Composition.h"
 #include "pagx/nodes/ConicGradient.h"
 #include "pagx/nodes/DiamondGradient.h"
@@ -34,6 +38,7 @@
 #include "pagx/nodes/Group.h"
 #include "pagx/nodes/Image.h"
 #include "pagx/nodes/ImagePattern.h"
+#include "pagx/nodes/InnerShadowFilter.h"
 #include "pagx/nodes/InnerShadowStyle.h"
 #include "pagx/nodes/Layer.h"
 #include "pagx/nodes/LinearGradient.h"
@@ -49,6 +54,7 @@
 #include "pagx/nodes/SolidColor.h"
 #include "pagx/nodes/Stroke.h"
 #include "pagx/nodes/Text.h"
+#include "pagx/nodes/TextBox.h"
 #include "pagx/nodes/TextModifier.h"
 #include "pagx/nodes/TextPath.h"
 #include "pagx/nodes/TrimPath.h"
@@ -60,6 +66,8 @@
 #include "pagx/types/RepeaterOrder.h"
 #include "pagx/types/SelectorTypes.h"
 #include "pagx/types/TileMode.h"
+#include "pagx/utils/Base64.h"
+#include "renderer/GlyphRunRenderer.h"
 #include "tgfx/core/ColorSpace.h"
 #include "tgfx/core/CustomTypeface.h"
 #include "tgfx/core/Data.h"
@@ -74,8 +82,11 @@
 #include "tgfx/layers/LayerPaint.h"
 #include "tgfx/layers/StrokeAlign.h"
 #include "tgfx/layers/VectorLayer.h"
+#include "tgfx/layers/filters/BlendFilter.h"
 #include "tgfx/layers/filters/BlurFilter.h"
+#include "tgfx/layers/filters/ColorMatrixFilter.h"
 #include "tgfx/layers/filters/DropShadowFilter.h"
+#include "tgfx/layers/filters/InnerShadowFilter.h"
 #include "tgfx/layers/filters/LayerFilter.h"
 #include "tgfx/layers/layerstyles/BackgroundBlurStyle.h"
 #include "tgfx/layers/layerstyles/DropShadowStyle.h"
@@ -99,13 +110,6 @@
 #include "tgfx/layers/vectors/TrimPath.h"
 #include "tgfx/layers/vectors/VectorGroup.h"
 
-#ifdef DEBUG
-#include <cassert>
-#define DEBUG_ASSERT(x) assert(x)
-#else
-#define DEBUG_ASSERT(x)
-#endif
-
 namespace pagx {
 
 // Decode a data URI (e.g., "data:image/png;base64,...") to an Image.
@@ -117,17 +121,24 @@ static std::shared_ptr<tgfx::Image> ImageFromDataURI(const std::string& dataURI)
   return tgfx::Image::MakeFromEncoded(ToTGFXData(data));
 }
 
-namespace {
-
 // Build context that maintains state during layer tree construction
 class LayerBuilderContext {
  public:
-  explicit LayerBuilderContext(const ShapedTextMap& shapedTextMap) : _shapedTextMap(shapedTextMap) {
+  LayerBuilderContext() = default;
+
+  LayerBuildResult buildWithMap(const PAGXDocument& document) {
+    auto root = build(document);
+    LayerBuildResult result = {};
+    result.root = root;
+    result.layerMap = std::move(_tgfxLayerByPagxLayer);
+    return result;
   }
 
   std::shared_ptr<tgfx::Layer> build(const PAGXDocument& document) {
     // Build layer tree.
     auto rootLayer = tgfx::Layer::Make();
+    // Apply canvas clipping: the root layer clips to the canvas dimensions.
+    rootLayer->setScrollRect(tgfx::Rect::MakeWH(document.width, document.height));
     for (const auto& layer : document.layers) {
       auto childLayer = convertLayer(layer);
       if (childLayer) {
@@ -208,6 +219,7 @@ class LayerBuilderContext {
   std::shared_ptr<tgfx::Layer> convertVectorLayer(const Layer* node) {
     auto layer = tgfx::VectorLayer::Make();
     std::vector<std::shared_ptr<tgfx::VectorElement>> contents;
+    contents.reserve(node->contents.size());
     for (const auto& element : node->contents) {
       auto tgfxElement = convertVectorElement(element);
       if (tgfxElement) {
@@ -218,7 +230,36 @@ class LayerBuilderContext {
     return layer;
   }
 
-  std::shared_ptr<tgfx::VectorElement> convertVectorElement(const Element* node) {
+  // Generate TextBlob for a Text node using GlyphRunRenderer with the given inverse matrix.
+  // For standalone Text (not inside TextBox), inverseMatrix is Identity.
+  // For TextBox children, inverseMatrix cancels the cumulative Group transforms.
+  static void PrepareTextBlob(Text* text, const tgfx::Matrix& inverseMatrix) {
+    if (!text->glyphData->layoutRuns.empty()) {
+      text->glyphData->textBlob =
+          GlyphRunRenderer::BuildTextBlobFromLayoutRuns(text->glyphData->layoutRuns, inverseMatrix);
+    } else if (!text->glyphRuns.empty()) {
+      GlyphRunRenderer::BuildTextBlob(text, inverseMatrix);
+    }
+  }
+
+  // Prepare TextBlobs for all Text children of a TextBox by applying inverse matrices.
+  // This must happen at render time (not layout time) so that tgfx's StrokePainter can
+  // detect the Group transform via geometry->matrix changes between apply() and draw().
+  void prepareTextBoxTextBlobs(const TextBox* textBox) {
+    std::vector<Text*> childText;
+    std::vector<tgfx::Matrix> matrices;
+    TextLayout::CollectTextElements(textBox->elements, childText, matrices);
+
+    for (size_t i = 0; i < childText.size(); i++) {
+      tgfx::Matrix inverse = {};
+      if (!matrices[i].invert(&inverse)) {
+        continue;
+      }
+      PrepareTextBlob(childText[i], inverse);
+    }
+  }
+
+  std::shared_ptr<tgfx::VectorElement> convertVectorElement(Element* node) {
     if (!node) {
       return nullptr;
     }
@@ -233,7 +274,7 @@ class LayerBuilderContext {
       case NodeType::Path:
         return convertPath(static_cast<const Path*>(node));
       case NodeType::Text:
-        return convertText(static_cast<const Text*>(node));
+        return convertText(static_cast<Text*>(node));
       case NodeType::Fill:
         return convertFill(static_cast<const Fill*>(node));
       case NodeType::Stroke:
@@ -252,9 +293,14 @@ class LayerBuilderContext {
         return convertTextModifier(static_cast<const TextModifier*>(node));
       case NodeType::Group:
         return convertGroup(static_cast<const Group*>(node));
-      case NodeType::TextLayout:
-        // TextLayout is handled in convertGroup, not converted directly.
-        return nullptr;
+      case NodeType::TextBox: {
+        auto* textBox = static_cast<const TextBox*>(node);
+        if (textBox->elements.empty()) {
+          return nullptr;
+        }
+        prepareTextBoxTextBlobs(textBox);
+        return convertGroup(textBox);
+      }
       default:
         return nullptr;
     }
@@ -262,7 +308,7 @@ class LayerBuilderContext {
 
   std::shared_ptr<tgfx::Rectangle> convertRectangle(const Rectangle* node) {
     auto rect = tgfx::Rectangle::Make();
-    rect->setCenter(ToTGFX(node->center));
+    rect->setPosition(ToTGFX(node->position));
     rect->setSize({node->size.width, node->size.height});
     rect->setRoundness(node->roundness);
     rect->setReversed(node->reversed);
@@ -271,7 +317,7 @@ class LayerBuilderContext {
 
   std::shared_ptr<tgfx::Ellipse> convertEllipse(const Ellipse* node) {
     auto ellipse = tgfx::Ellipse::Make();
-    ellipse->setCenter(ToTGFX(node->center));
+    ellipse->setPosition(ToTGFX(node->position));
     ellipse->setSize({node->size.width, node->size.height});
     ellipse->setReversed(node->reversed);
     return ellipse;
@@ -279,7 +325,7 @@ class LayerBuilderContext {
 
   std::shared_ptr<tgfx::Polystar> convertPolystar(const Polystar* node) {
     auto polystar = tgfx::Polystar::Make();
-    polystar->setCenter(ToTGFX(node->center));
+    polystar->setPosition(ToTGFX(node->position));
     polystar->setPointCount(node->pointCount);
     polystar->setOuterRadius(node->outerRadius);
     polystar->setInnerRadius(node->innerRadius);
@@ -297,6 +343,7 @@ class LayerBuilderContext {
 
   std::shared_ptr<tgfx::ShapePath> convertPath(const Path* node) {
     auto shapePath = tgfx::ShapePath::Make();
+    shapePath->setPosition(ToTGFX(node->position));
     if (node->data) {
       shapePath->setPath(ToTGFX(*node->data));
     }
@@ -304,13 +351,16 @@ class LayerBuilderContext {
     return shapePath;
   }
 
-  std::shared_ptr<tgfx::Text> convertText(const Text* node) {
-    auto it = _shapedTextMap.find(node);
-    if (it == _shapedTextMap.end() || it->second.textBlob == nullptr) {
+  std::shared_ptr<tgfx::Text> convertText(Text* node) {
+    auto textBlob = node->glyphData->textBlob;
+    if (textBlob == nullptr) {
+      PrepareTextBlob(node, tgfx::Matrix::I());
+      textBlob = node->glyphData->textBlob;
+    }
+    if (textBlob == nullptr) {
       return nullptr;
     }
-    auto& shapedText = it->second;
-    auto tgfxText = tgfx::Text::Make(shapedText.textBlob, shapedText.anchors);
+    auto tgfxText = tgfx::Text::Make(textBlob, node->glyphData->anchors);
     if (tgfxText) {
       tgfxText->setPosition(tgfx::Point::Make(node->position.x, node->position.y));
     }
@@ -323,7 +373,7 @@ class LayerBuilderContext {
       colorSource = convertColorSource(node->color);
     }
     if (colorSource == nullptr) {
-      return nullptr;
+      colorSource = tgfx::SolidColor::Make();
     }
 
     auto fill = tgfx::FillStyle::Make(colorSource);
@@ -348,7 +398,7 @@ class LayerBuilderContext {
       colorSource = convertColorSource(node->color);
     }
     if (colorSource == nullptr) {
-      return nullptr;
+      colorSource = tgfx::SolidColor::Make();
     }
 
     auto stroke = tgfx::StrokeStyle::Make(colorSource);
@@ -413,14 +463,14 @@ class LayerBuilderContext {
     }
   }
 
-  static void ExtractGradientStops(const std::vector<ColorStop>& colorStops,
+  static void ExtractGradientStops(const std::vector<ColorStop*>& colorStops,
                                    std::vector<tgfx::Color>* colors,
                                    std::vector<float>* positions) {
     colors->reserve(colorStops.size());
     positions->reserve(colorStops.size());
-    for (const auto& stop : colorStops) {
-      colors->push_back(ToTGFX(stop.color));
-      positions->push_back(stop.offset);
+    for (const auto* stop : colorStops) {
+      colors->push_back(ToTGFX(stop->color));
+      positions->push_back(stop->offset);
     }
     if (colors->empty()) {
       *colors = {tgfx::Color::Black(), tgfx::Color::White()};
@@ -459,10 +509,9 @@ class LayerBuilderContext {
     std::vector<tgfx::Color> colors;
     std::vector<float> positions;
     ExtractGradientStops(node->colorStops, &colors, &positions);
-    return ApplyGradientMatrix(
-        tgfx::Gradient::MakeConic(ToTGFX(node->center), node->startAngle, node->endAngle, colors,
-                                  positions),
-        node->matrix);
+    return ApplyGradientMatrix(tgfx::Gradient::MakeConic(ToTGFX(node->center), node->startAngle,
+                                                         node->endAngle, colors, positions),
+                               node->matrix);
   }
 
   std::shared_ptr<tgfx::ColorSource> convertDiamondGradient(const DiamondGradient* node) {
@@ -494,8 +543,9 @@ class LayerBuilderContext {
       return nullptr;
     }
 
-    auto pattern = tgfx::ImagePattern::Make(image, ToTGFX(node->tileModeX),
-                                             ToTGFX(node->tileModeY));
+    auto sampling = tgfx::SamplingOptions(ToTGFX(node->filterMode), ToTGFX(node->mipmapMode));
+    auto pattern =
+        tgfx::ImagePattern::Make(image, ToTGFX(node->tileModeX), ToTGFX(node->tileModeY), sampling);
     if (pattern && !node->matrix.isIdentity()) {
       pattern->setMatrix(ToTGFX(node->matrix));
     }
@@ -582,6 +632,7 @@ class LayerBuilderContext {
 
     // Convert selectors
     std::vector<std::shared_ptr<tgfx::TextSelector>> tgfxSelectors;
+    tgfxSelectors.reserve(node->selectors.size());
     for (const auto* selector : node->selectors) {
       if (selector->nodeType() == NodeType::RangeSelector) {
         auto rangeSelector = static_cast<const RangeSelector*>(selector);
@@ -611,9 +662,13 @@ class LayerBuilderContext {
     elements.reserve(node->elements.size());
 
     for (const auto& element : node->elements) {
-      // Skip TextLayout modifier - layout has been baked into GlyphRun positions by Typesetter
-      if (element->nodeType() == NodeType::TextLayout) {
-        continue;
+      // Skip empty TextBox modifier (no children) - layout has been baked into GlyphRun positions
+      // by TextLayout. TextBox with children is rendered as a Group.
+      if (element->nodeType() == NodeType::TextBox) {
+        auto* textBox = static_cast<const TextBox*>(element);
+        if (textBox->elements.empty()) {
+          continue;
+        }
       }
 
       auto tgfxElement = convertVectorElement(element);
@@ -666,16 +721,35 @@ class LayerBuilderContext {
       layer->setMatrix(matrix);
     }
 
-    // Apply scrollRect if present
+    // Apply 3D matrix if present (overrides 2D matrix)
+    if (!node->matrix3D.isIdentity()) {
+      layer->setMatrix3D(ToTGFX3D(node->matrix3D));
+    }
+    if (node->preserve3D) {
+      layer->setPreserve3D(true);
+    }
+
+    // Apply layer rendering attributes
+    if (!node->antiAlias) {
+      layer->setAllowsEdgeAntialiasing(false);
+    }
+    layer->setAllowsGroupOpacity(node->groupOpacity);
+    if (!node->passThroughBackground) {
+      layer->setPassThroughBackground(false);
+    }
     if (node->hasScrollRect) {
       layer->setScrollRect(ToTGFX(node->scrollRect));
     }
 
     // Layer styles
     std::vector<std::shared_ptr<tgfx::LayerStyle>> styles;
+    styles.reserve(node->styles.size());
     for (const auto& style : node->styles) {
       auto tgfxStyle = convertLayerStyle(style);
       if (tgfxStyle) {
+        if (style->excludeChildEffects) {
+          tgfxStyle->setExcludeChildEffects(true);
+        }
         styles.push_back(tgfxStyle);
       }
     }
@@ -685,6 +759,7 @@ class LayerBuilderContext {
 
     // Layer filters
     std::vector<std::shared_ptr<tgfx::LayerFilter>> filters;
+    filters.reserve(node->filters.size());
     for (const auto& filter : node->filters) {
       auto tgfxFilter = convertLayerFilter(filter);
       if (tgfxFilter) {
@@ -704,17 +779,31 @@ class LayerBuilderContext {
     switch (node->nodeType()) {
       case NodeType::DropShadowStyle: {
         auto style = static_cast<const DropShadowStyle*>(node);
-        return tgfx::DropShadowStyle::Make(style->offsetX, style->offsetY, style->blurX,
-                                           style->blurY, ToTGFX(style->color));
+        auto tgfxStyle =
+            tgfx::DropShadowStyle::Make(style->offsetX, style->offsetY, style->blurX, style->blurY,
+                                        ToTGFX(style->color), style->showBehindLayer);
+        if (node->blendMode != BlendMode::Normal) {
+          tgfxStyle->setBlendMode(ToTGFX(node->blendMode));
+        }
+        return tgfxStyle;
       }
       case NodeType::InnerShadowStyle: {
         auto style = static_cast<const InnerShadowStyle*>(node);
-        return tgfx::InnerShadowStyle::Make(style->offsetX, style->offsetY, style->blurX,
-                                            style->blurY, ToTGFX(style->color));
+        auto tgfxStyle = tgfx::InnerShadowStyle::Make(style->offsetX, style->offsetY, style->blurX,
+                                                      style->blurY, ToTGFX(style->color));
+        if (node->blendMode != BlendMode::Normal) {
+          tgfxStyle->setBlendMode(ToTGFX(node->blendMode));
+        }
+        return tgfxStyle;
       }
       case NodeType::BackgroundBlurStyle: {
         auto style = static_cast<const pagx::BackgroundBlurStyle*>(node);
-        return tgfx::BackgroundBlurStyle::Make(style->blurX, style->blurY);
+        auto tgfxStyle =
+            tgfx::BackgroundBlurStyle::Make(style->blurX, style->blurY, ToTGFX(style->tileMode));
+        if (node->blendMode != BlendMode::Normal) {
+          tgfxStyle->setBlendMode(ToTGFX(node->blendMode));
+        }
+        return tgfxStyle;
       }
       default:
         return nullptr;
@@ -729,7 +818,7 @@ class LayerBuilderContext {
     switch (node->nodeType()) {
       case NodeType::BlurFilter: {
         auto filter = static_cast<const pagx::BlurFilter*>(node);
-        return tgfx::BlurFilter::Make(filter->blurX, filter->blurY);
+        return tgfx::BlurFilter::Make(filter->blurX, filter->blurY, ToTGFX(filter->tileMode));
       }
       case NodeType::DropShadowFilter: {
         auto filter = static_cast<const DropShadowFilter*>(node);
@@ -737,37 +826,60 @@ class LayerBuilderContext {
                                             filter->blurY, ToTGFX(filter->color),
                                             filter->shadowOnly);
       }
+      case NodeType::InnerShadowFilter: {
+        auto filter = static_cast<const pagx::InnerShadowFilter*>(node);
+        return tgfx::InnerShadowFilter::Make(filter->offsetX, filter->offsetY, filter->blurX,
+                                             filter->blurY, ToTGFX(filter->color),
+                                             filter->shadowOnly);
+      }
+      case NodeType::BlendFilter: {
+        auto filter = static_cast<const pagx::BlendFilter*>(node);
+        return tgfx::BlendFilter::Make(ToTGFX(filter->color), ToTGFX(filter->blendMode));
+      }
+      case NodeType::ColorMatrixFilter: {
+        auto filter = static_cast<const pagx::ColorMatrixFilter*>(node);
+        return tgfx::ColorMatrixFilter::Make(filter->matrix);
+      }
       default:
         return nullptr;
     }
   }
 
-  const ShapedTextMap& _shapedTextMap;
   std::unordered_map<const Layer*, std::shared_ptr<tgfx::Layer>> _tgfxLayerByPagxLayer = {};
   std::vector<std::tuple<std::shared_ptr<tgfx::Layer>, const Layer*, tgfx::LayerMaskType>>
       _pendingMasks = {};
 };
 
-}  // namespace
-
 // Public API implementation
 
-std::shared_ptr<tgfx::Layer> LayerBuilder::Build(PAGXDocument* document, Typesetter* typesetter) {
+std::shared_ptr<tgfx::Layer> LayerBuilder::Build(PAGXDocument* document) {
   if (document == nullptr) {
     return nullptr;
   }
-
-  // Create ShapedTextMap using provided or default Typesetter
-  TypesetterResult typesetterResult = {};
-  if (typesetter != nullptr) {
-    typesetterResult = typesetter->shape(document);
-  } else {
-    Typesetter defaultTypesetter;
-    typesetterResult = defaultTypesetter.shape(document);
+  if (!document->isLayoutApplied()) {
+    LOGE("LayerBuilder::Build() called before applyLayout(). Call document->applyLayout() first.");
+    DEBUG_ASSERT(false);
+    return nullptr;
   }
 
-  LayerBuilderContext context(typesetterResult.shapedTextMap);
+  LayerBuilderContext context;
   return context.build(*document);
+}
+
+LayerBuildResult LayerBuilder::BuildWithMap(PAGXDocument* document) {
+  if (document == nullptr) {
+    return {};
+  }
+  if (!document->isLayoutApplied()) {
+    LOGE(
+        "LayerBuilder::BuildWithMap() called before applyLayout(). Call document->applyLayout() "
+        "first.");
+    DEBUG_ASSERT(false);
+    return {};
+  }
+
+  LayerBuilderContext context;
+  return context.buildWithMap(*document);
 }
 
 }  // namespace pagx

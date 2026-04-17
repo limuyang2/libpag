@@ -20,30 +20,29 @@
 
 #include <memory>
 #include <string>
-#include <unordered_map>
 #include <vector>
+#include "pagx/FontConfig.h"
 #include "pagx/nodes/Layer.h"
 #include "pagx/nodes/Node.h"
 #include "pagx/types/Data.h"
 
 namespace pagx {
 
+class LayoutContext;
+
 /**
  * PAGXDocument is the root container for a PAGX document.
  * It contains resources and layers. This is a pure data structure class.
  * Use PAGXImporter to load documents and PAGXExporter to save documents.
  */
-class PAGXDocument {
+class PAGXDocument : public Node {
  public:
   /**
    * Creates an empty document with the specified size.
+   * @param width the canvas width in pixels
+   * @param height the canvas height in pixels
    */
   static std::shared_ptr<PAGXDocument> Make(float width, float height);
-
-  /**
-   * Format version.
-   */
-  std::string version = "1.0";
 
   /**
    * Canvas width.
@@ -65,6 +64,8 @@ class PAGXDocument {
    * If an ID is provided, the node will be indexed for lookup.
    * If the ID already exists, an error will be logged and the new node will replace the old one in
    * the index.
+   * @param id an optional unique identifier for the node, used for lookup via findNode(). If empty,
+   * the node is not indexed.
    */
   template <typename T>
   T* makeNode(const std::string& id = "") {
@@ -98,6 +99,19 @@ class PAGXDocument {
   std::vector<std::unique_ptr<Node>> nodes = {};
 
   /**
+   * Errors collected during parsing. Non-empty errors indicate structural issues in the source
+   * document but do not prevent the document from being returned. The parsed content may be
+   * incomplete where errors occurred.
+   */
+  std::vector<std::string> errors = {};
+
+  /**
+   * Returns true if any layer in the document has unresolved import content (inline `<svg>` or
+   * `import` attribute). These must be resolved via `pagx resolve` before layout or rendering.
+   */
+  bool hasUnresolvedImports() const;
+
+  /**
    * Returns a list of external file paths referenced by Image nodes that have no embedded data.
    * Data URIs (paths starting with "data:") are excluded.
    */
@@ -107,19 +121,48 @@ class PAGXDocument {
    * Loads external file data for an Image node matching the given file path. Once loaded, the
    * Image's data field is populated and its filePath is cleared, so the renderer uses embedded data
    * instead of file I/O.
+   * @param filePath the external file path to match against Image nodes
+   * @param data the file content to embed into the matching Image node
+   * @return true if a matching Image node was found and its data was loaded successfully
    */
   bool loadFileData(const std::string& filePath, std::shared_ptr<Data> data);
 
+  /**
+   * Executes auto layout on the document, positioning layers according to their layout
+   * constraints. Must be called before rendering or font embedding. This method should only
+   * be called once per document — repeated calls may produce incorrect results because
+   * measurement data is cached and some layout operations permanently modify source geometry.
+   * @param fontConfig Optional font config for text measurement and rendering. When provided,
+   *                   updates the internal config before layout. Pass nullptr to use the
+   *                   previously set config (or no config).
+   */
+  void applyLayout(const FontConfig* fontConfig = nullptr);
+
+  /**
+   * Returns true if applyLayout() has been called at least once.
+   */
+  bool isLayoutApplied() const {
+    return layoutApplied;
+  }
+
+  NodeType nodeType() const override {
+    return NodeType::Document;
+  }
+
  private:
   PAGXDocument() = default;
+  static void layoutLayers(const std::vector<Layer*>& layers, float containerW, float containerH,
+                           LayoutContext* context);
 
   void registerNode(Node* node, const std::string& id);
 
+  FontConfig fontConfig;
+  bool layoutApplied = false;
   std::unordered_map<std::string, Node*> nodeMap = {};
 
   friend class PAGXImporter;
   friend class PAGXExporter;
-  friend class TypesetterContext;
+  friend class TextLayoutContext;
 };
 
 }  // namespace pagx

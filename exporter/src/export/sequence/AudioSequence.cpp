@@ -17,7 +17,10 @@
 /////////////////////////////////////////////////////////////////////////////////////////////////
 
 #include "AudioSequence.h"
-#include "ffaudio.h"
+#include <cstdio>
+#include "ffmovie/movie.h"
+#include "platform/PlatformHelper.h"
+#include "utils/FileHelper.h"
 #include "utils/PAGExportSession.h"
 #include "utils/PAGExportSessionManager.h"
 
@@ -39,11 +42,77 @@ void CombineAudioMarkers(std::vector<pag::Composition*>& compositions) {
   }
 }
 
-void GetAudioSequence(const AEGP_ItemH& itemHandle, const std::string& outputPath,
-                      pag::Composition* composition) {
+static std::string EncodeAudioToMP4(int16_t* samples, int numSamples, int channels,
+                                    int sampleRate) {
+  // Use a safe ASCII path in the temp folder to avoid encoding issues with non-ASCII characters
+  // on Windows, where FFmpeg may not correctly handle UTF-8 paths.
+  std::string mp4Path = JoinPaths(GetTempFolderPath(), ".pag_audio_temp.mp4");
+  ffmovie::AudioExportConfig audioConfig = {};
+  audioConfig.sampleRate = sampleRate;
+  audioConfig.channels = channels;
+  audioConfig.audioBitrate = 128000;
+  auto encoder = ffmovie::FFAudioEncoder::Make(audioConfig);
+  if (encoder == nullptr || !encoder->initEncoder()) {
+    return "";
+  }
+  auto mediaFormat = encoder->getMediaFormat();
+  if (mediaFormat == nullptr) {
+    return "";
+  }
+  auto muxer = ffmovie::FFMediaMuxer::Make();
+  if (muxer == nullptr || !muxer->initMuxer(mp4Path)) {
+    return "";
+  }
+  int trackIndex = muxer->addTrack(mediaFormat);
+  if (trackIndex < 0 || !muxer->start()) {
+    return "";
+  }
+
+  int frameSize = mediaFormat->getInteger(KEY_AUDIO_FRAME_SIZE);
+  if (frameSize <= 0) {
+    frameSize = 1024;
+  }
+  int offset = 0;
+  while (offset < numSamples) {
+    int samplesToSend = std::min(frameSize, numSamples - offset);
+    auto* data = reinterpret_cast<uint8_t*>(samples + offset * channels);
+    int64_t length = samplesToSend * sizeof(int16_t) * channels;
+    auto result = encoder->onSendData(data, length, samplesToSend);
+    if (result == ffmovie::CodingResult::CodingError) {
+      break;
+    }
+    void* packet = nullptr;
+    auto encodeResult = encoder->onEncodeData(&packet);
+    if (encodeResult == ffmovie::CodingResult::CodingSuccess && packet != nullptr) {
+      muxer->writeFrame(trackIndex, packet);
+    } else if (encodeResult == ffmovie::CodingResult::CodingError) {
+      break;
+    }
+    offset += samplesToSend;
+  }
+
+  bool encodeSuccess = (offset >= numSamples);
+  encoder->onEndOfStream();
+  while (true) {
+    void* packet = nullptr;
+    auto result = encoder->onEncodeData(&packet);
+    if (result == ffmovie::CodingResult::CodingSuccess && packet != nullptr) {
+      muxer->writeFrame(trackIndex, packet);
+    } else {
+      break;
+    }
+  }
+  muxer->stop();
+  if (!encodeSuccess) {
+    std::remove(mp4Path.c_str());
+    return "";
+  }
+  return mp4Path;
+}
+
+void GetAudioSequence(const AEGP_ItemH& itemHandle, pag::Composition* composition) {
   const auto& Suites = GetSuites();
   const auto& PluginID = GetPluginID();
-  std::string path = outputPath;
 
   AEGP_ItemFlags flags = 0;
   Suites->ItemSuite6()->AEGP_GetItemFlags(itemHandle, &flags);
@@ -68,26 +137,27 @@ void GetAudioSequence(const AEGP_ItemH& itemHandle, const std::string& outputPat
     A_long numSamples = 0;
     Suites->SoundDataSuite1()->AEGP_GetNumSamples(soundData, &numSamples);
     if (numSamples > 0) {
-      auto muxer = new AudioMuxer();
-      AEGP_SoundDataFormat soundFormat2;
+      AEGP_SoundDataFormat soundFormat2 = {};
       Suites->SoundDataSuite1()->AEGP_GetSoundDataFormat(soundData, &soundFormat2);
-      bool ret = muxer->init(path, static_cast<int>(soundFormat2.num_channelsL),
-                             static_cast<int>(soundFormat2.sample_rateF));
-      if (ret) {
-        void* samples = nullptr;
-        Suites->SoundDataSuite1()->AEGP_LockSoundDataSamples(soundData, &samples);
-        int startSamples = 0;
-        int offset = startSamples * soundFormat2.num_channelsL;
-        muxer->putData(static_cast<int16_t*>(samples) + offset, numSamples);
-        muxer->close();
-        composition->audioBytes = pag::ByteData::FromPath(muxer->getFilename()).get();
+      void* samples = nullptr;
+      Suites->SoundDataSuite1()->AEGP_LockSoundDataSamples(soundData, &samples);
+
+      int startSamples = 0;
+      int offset = startSamples * soundFormat2.num_channelsL;
+      std::string mp4Path = EncodeAudioToMP4(static_cast<int16_t*>(samples) + offset, numSamples,
+                                             static_cast<int>(soundFormat2.num_channelsL),
+                                             static_cast<int>(soundFormat2.sample_rateF));
+
+      if (!mp4Path.empty()) {
+        composition->audioBytes = pag::ByteData::FromPath(mp4Path).release();
         composition->audioStartTime = static_cast<pag::Frame>(
             (startSamples / soundFormat2.sample_rateF) * composition->frameRate);
-        Suites->SoundDataSuite1()->AEGP_UnlockSoundDataSamples(soundData);
+        DeleteFile(mp4Path);
       } else {
         PAGExportSessionManager::GetInstance()->recordWarning(AlertInfoType::AudioEncodeFail);
       }
-      delete muxer;
+
+      Suites->SoundDataSuite1()->AEGP_UnlockSoundDataSamples(soundData);
     }
     Suites->SoundDataSuite1()->AEGP_DisposeSoundData(soundData);
   }

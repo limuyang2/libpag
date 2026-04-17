@@ -28,6 +28,12 @@ namespace pagx {
  * resources (Image, Composition, ColorSources) and elements (shapes, painters, modifiers, etc.).
  */
 enum class NodeType {
+  // Document
+  /**
+   * The root document node.
+   */
+  Document,
+
   // Resources
   /**
    * A reusable path data resource.
@@ -170,9 +176,9 @@ enum class NodeType {
    */
   TextPath,
   /**
-   * A text modifier that controls text layout and alignment.
+   * A text modifier that controls text layout and alignment within a text box.
    */
-  TextLayout,
+  TextBox,
   /**
    * A container that groups multiple elements with its own transform.
    */
@@ -206,9 +212,20 @@ class Node {
   std::string id = {};
 
   /**
-   * Custom data attributes. The keys are stored without the "data-" prefix.
+   * Custom data attributes. The keys are stored without the "data-" prefix. Each key must contain
+   * only lowercase letters, digits, and hyphens, must not end with a hyphen, and must have at least
+   * one character. Values are arbitrary strings interpreted by the creating application. These
+   * attributes are not processed at runtime and are used only for passing metadata between tools or
+   * storing debug information.
    */
   std::unordered_map<std::string, std::string> customData = {};
+
+  /**
+   * The line number in the source XML file where this node was defined. A value of -1 means no
+   * source line information is available (e.g., programmatically created nodes). Set by
+   * PAGXImporter during parsing.
+   */
+  int sourceLine = -1;
 
   virtual ~Node() = default;
 

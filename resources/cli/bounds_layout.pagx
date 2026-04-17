@@ -1,0 +1,28 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- File with named layers for bounds query testing -->
+<pagx width="400" height="300">
+  <Layer id="header" name="Header Bar">
+    <Rectangle size="400,60"/>
+    <Fill color="#2196F3"/>
+  </Layer>
+  <Layer id="sidebar" name="Side Navigation">
+    <Rectangle top="60" size="100,240"/>
+    <Fill color="#607D8B"/>
+  </Layer>
+  <Layer id="content" name="Main Content">
+    <Rectangle left="100" top="60" size="300,240"/>
+    <Fill color="#ECEFF1"/>
+    <Layer id="card1" name="Card 1">
+      <Rectangle left="-120" top="-50" size="120,100" roundness="8"/>
+      <Fill color="#FFFFFF"/>
+    </Layer>
+    <Layer id="card2" name="Card 2">
+      <Rectangle left="20" top="-50" size="120,100" roundness="8"/>
+      <Fill color="#FFFFFF"/>
+    </Layer>
+  </Layer>
+  <Layer id="footer" name="Footer">
+    <Rectangle top="270" size="400,30"/>
+    <Fill color="#37474F"/>
+  </Layer>
+</pagx>

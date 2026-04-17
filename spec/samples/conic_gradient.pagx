@@ -1,0 +1,18 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- Demonstrates conic (sweep) gradient -->
+<pagx width="400" height="400">
+  <Layer>
+    <Ellipse left="40" top="40" size="320,320"/>
+    <Fill>
+      <ConicGradient center="200,200">
+        <ColorStop color="#F43F5E" offset="0"/>
+        <ColorStop color="#F59E0B" offset="0.2"/>
+        <ColorStop color="#10B981" offset="0.4"/>
+        <ColorStop color="#06B6D4" offset="0.6"/>
+        <ColorStop color="#8B5CF6" offset="0.8"/>
+        <ColorStop color="#F43F5E" offset="1"/>
+      </ConicGradient>
+    </Fill>
+    <DropShadowStyle offsetY="8" blurX="32" blurY="32" color="#8B5CF650"/>
+  </Layer>
+</pagx>
