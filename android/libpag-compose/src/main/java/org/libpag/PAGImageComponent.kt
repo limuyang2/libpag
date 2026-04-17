@@ -103,6 +103,7 @@ fun PAGImageComponent(
  */
 @Composable
 fun PAGImageComponent(
+    modifier: Modifier = Modifier,
     state: PAGImageState,
     scaleMode: Int = PAGScaleMode.LetterBox,
     renderScale: Float = 1.0f,
@@ -111,7 +112,6 @@ fun PAGImageComponent(
     autoPlay: Boolean = true,
     currentFrame: Int? = null,
     matrix: StableMatrix = StableMatrix.Identity,
-    modifier: Modifier = Modifier
 ) {
     val lifecycleOwner = LocalLifecycleOwner.current
 
