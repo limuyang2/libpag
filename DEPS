@@ -7,12 +7,12 @@
     "common": [
       {
         "url": "${PAG_GROUP}/vendor_tools.git",
-        "commit": "0f4264d14ce6c8d1185d27dc9e2e6ee758a8bbcb",
+        "commit": "9e11e4fbd54903a807f2a3708f6b6637a0892252",
         "dir": "third_party/vendor_tools"
       },
       {
         "url": "${PAG_GROUP}/tgfx.git",
-        "commit": "7069da198a399c4a313ffacef4aeb8e0e8ccd5e1",
+        "commit": "42d8f68589d729b545899fbaa19f350ba0810577",
         "dir": "third_party/tgfx"
       },
       {
@@ -27,7 +27,7 @@
       },
       {
         "url": "https://github.com/harfbuzz/harfbuzz.git",
-        "commit": "f1f2be776bcd994fa9262622e1a7098a066e5cf7",
+        "commit": "9ef44a2d67ac870c1f7f671f6dc98d08a2579865",
         "dir": "third_party/harfbuzz"
       },
       {
@@ -39,6 +39,16 @@
         "url": "https://github.com/libexpat/libexpat.git",
         "commit": "88b3ed553d8ad335559254863a33360d55b9f1d6",
         "dir": "third_party/expat"
+      },
+      {
+        "url": "https://github.com/Tehreer/SheenBidi.git",
+        "commit": "cfe430e7375a7845b679adae9d51dac6deaa8858",
+        "dir": "third_party/SheenBidi"
+      },
+      {
+        "url": "https://github.com/GNOME/libxml2.git",
+        "commit": "3d840e17858de03a09fba8b202e3a89267d5795a",
+        "dir": "third_party/libxml2"
       }
     ]
   },

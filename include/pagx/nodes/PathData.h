@@ -21,6 +21,7 @@
 #include <string>
 #include <vector>
 #include "pagx/nodes/Node.h"
+#include "pagx/types/Matrix.h"
 #include "pagx/types/PathVerb.h"
 #include "pagx/types/Point.h"
 #include "pagx/types/Rect.h"
@@ -36,11 +37,15 @@ class PathData : public Node {
  public:
   /**
    * Starts a new contour at the specified point.
+   * @param x the x-coordinate of the starting point
+   * @param y the y-coordinate of the starting point
    */
   void moveTo(float x, float y);
 
   /**
    * Adds a line from the current point to the specified point.
+   * @param x the x-coordinate of the end point
+   * @param y the y-coordinate of the end point
    */
   void lineTo(float x, float y);
 
@@ -122,12 +127,24 @@ class PathData : public Node {
    */
   static int PointsPerVerb(PathVerb verb);
 
+  /**
+   * Copies the path data (verbs and points) from another PathData, without affecting the Node
+   * base class fields (id).
+   */
+  PathData& operator=(const PathData& other);
+
+  /**
+   * Transforms all points by the given affine matrix.
+   */
+  void transform(const Matrix& matrix);
+
   NodeType nodeType() const override {
     return NodeType::PathData;
   }
 
  private:
   PathData() = default;
+  PathData(const PathData& other) = default;
 
   std::vector<PathVerb> _verbs = {};
   std::vector<Point> _points = {};

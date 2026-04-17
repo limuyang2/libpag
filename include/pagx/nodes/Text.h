@@ -20,9 +20,12 @@
 
 #include <string>
 #include <vector>
+#include "pagx/nodes/LayoutNode.h"
 #include "pagx/nodes/Element.h"
 #include "pagx/nodes/GlyphRun.h"
 #include "pagx/types/Point.h"
+#include "pagx/types/TextAnchor.h"
+#include "pagx/types/TextBaseline.h"
 
 namespace pagx {
 
@@ -34,17 +37,16 @@ namespace pagx {
  * - Runtime shaping mode: Performs text shaping at runtime using the text content and font
  *   properties. Results may vary slightly across platforms due to font and shaping differences.
  */
-class Text : public Element {
+class Text : public Element, public LayoutNode {
  public:
   /**
-   * The text content to render. Supports newline characters (\n) for line breaks, which use a
-   * default line height of 1.2 times the font size.
+   * The text content to render. Supports newline characters (\n) for line breaks, which use the
+   * font metrics line height (ascent + descent + leading).
    */
   std::string text = {};
 
   /**
-   * The position of the text origin (x, y where y is the baseline). This can be overridden by
-   * TextLayout or TextPath modifiers. The default value is (0, 0).
+   * The position of the text origin (x, y where y is the baseline). The default value is (0, 0).
    */
   Point position = {};
 
@@ -72,24 +74,57 @@ class Text : public Element {
   float letterSpacing = 0.0f;
 
   /**
-   * The baseline shift for superscript/subscript effects. Positive values shift up, negative values
-   * shift down. The default value is 0.
+   * Whether to apply algorithmic bolding. The default value is false.
    */
-  float baselineShift = 0.0f;
+  bool fauxBold = false;
+
+  /**
+   * Whether to apply algorithmic slanting. The default value is false.
+   */
+  bool fauxItalic = false;
+
+  /**
+   * The text anchor alignment. Controls how text is positioned relative to its origin. Start means
+   * the origin is at the text start, Center centers the text on the origin, and End places the text
+   * ending at the origin. Ignored when a TextBox controls the layout. The default value is Start.
+   */
+  TextAnchor textAnchor = TextAnchor::Start;
 
   /**
    * Pre-shaped glyph runs. When present, these are used for rendering instead of runtime shaping.
    */
   std::vector<GlyphRun*> glyphRuns = {};
 
+  /**
+   * Specifies how position.y is interpreted. LineBox (default): position.y is the top of the
+   * linebox (based on font metrics line height). Alphabetic: position.y is the alphabetic baseline.
+   */
+  TextBaseline baseline = TextBaseline::LineBox;
+
+  ~Text() override;
+
   NodeType nodeType() const override {
     return NodeType::Text;
   }
 
- private:
-  Text() = default;
+ protected:
+  void onMeasure(LayoutContext* context) override;
+  void setLayoutSize(LayoutContext* context, float width, float height) override;
+  void setLayoutPosition(LayoutContext* context, float x, float y) override;
 
+ private:
+  Text();
+
+  struct GlyphData;
+  GlyphData* glyphData;
+  Rect textBounds = {};
+
+  friend class FontEmbedder;
+  friend class GlyphRunRenderer;
+  friend class LayerBuilderContext;
   friend class PAGXDocument;
+  friend class TextBox;
+  friend class TextLayout;
 };
 
 }  // namespace pagx

@@ -69,6 +69,22 @@ void PathData::close() {
   _verbs.push_back(PathVerb::Close);
 }
 
+PathData& PathData::operator=(const PathData& other) {
+  if (this != &other) {
+    _verbs = other._verbs;
+    _points = other._points;
+    _boundsDirty = true;
+  }
+  return *this;
+}
+
+void PathData::transform(const Matrix& matrix) {
+  for (auto& point : _points) {
+    point = matrix.mapPoint(point);
+  }
+  _boundsDirty = true;
+}
+
 Rect PathData::getBounds() {
   if (!_boundsDirty) {
     return _cachedBounds;

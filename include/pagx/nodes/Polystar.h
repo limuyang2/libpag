@@ -18,21 +18,24 @@
 
 #pragma once
 
+#include "pagx/nodes/LayoutNode.h"
 #include "pagx/nodes/Element.h"
 #include "pagx/types/Point.h"
 #include "pagx/types/PolystarType.h"
+#include "pagx/types/Rect.h"
 
 namespace pagx {
 
 /**
  * Polystar represents a polygon or star shape with configurable points, radii, and roundness.
  */
-class Polystar : public Element {
+class Polystar : public Element, public LayoutNode {
  public:
   /**
-   * The center point of the polystar.
+   * The center point of the polystar. When not explicitly set, defaults to the negative of the
+   * bounding box origin so that the top-left pixel aligns with the origin (0, 0).
    */
-  Point center = {};
+  Point position = {};
 
   /**
    * The type of polystar shape, either Star or Polygon. The default value is Star.
@@ -60,12 +63,12 @@ class Polystar : public Element {
   float rotation = 0.0f;
 
   /**
-   * The roundness of the outer points, ranging from 0 to 100. The default value is 0.
+   * The roundness of the outer points, ranging from 0 to 1. The default value is 0.
    */
   float outerRoundness = 0.0f;
 
   /**
-   * The roundness of the inner points, ranging from 0 to 100. Only applies when type is Star. The
+   * The roundness of the inner points, ranging from 0 to 1. Only applies when type is Star. The
    * default value is 0.
    */
   float innerRoundness = 0.0f;
@@ -78,6 +81,18 @@ class Polystar : public Element {
   NodeType nodeType() const override {
     return NodeType::Polystar;
   }
+
+  /**
+   * Computes the tight bounding box of the polystar by iterating over all vertices.
+   * Unlike using outerRadius as a square, this accounts for the actual vertex positions
+   * determined by pointCount, rotation, and innerRadius (for star type).
+   */
+  Rect getContentBounds() const;
+
+ protected:
+  void onMeasure(LayoutContext* context) override;
+  void setLayoutSize(LayoutContext* context, float width, float height) override;
+  void setLayoutPosition(LayoutContext* context, float x, float y) override;
 
  private:
   Polystar() = default;

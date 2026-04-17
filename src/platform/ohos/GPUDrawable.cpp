@@ -23,28 +23,27 @@
 
 namespace pag {
 std::shared_ptr<GPUDrawable> GPUDrawable::FromWindow(NativeWindow* nativeWindow,
-                                                     EGLContext sharedContext) {
+                                                     EGLContext sharedContext, bool ownsWindow) {
   if (!nativeWindow) {
     LOGE("GPUDrawable.FromWindow() The nativeWindow is invalid.");
     return nullptr;
   }
-  return std::shared_ptr<GPUDrawable>(new GPUDrawable(nativeWindow, sharedContext));
+  return std::shared_ptr<GPUDrawable>(new GPUDrawable(nativeWindow, sharedContext, ownsWindow));
 }
 
-GPUDrawable::GPUDrawable(NativeWindow* nativeWindow, EGLContext eglContext)
-    : nativeWindow(nativeWindow), sharedContext(eglContext) {
+GPUDrawable::GPUDrawable(NativeWindow* nativeWindow, EGLContext eglContext, bool ownsWindow)
+    : nativeWindow(nativeWindow), sharedContext(eglContext), ownsWindow(ownsWindow) {
   updateSize();
 }
 
 GPUDrawable::~GPUDrawable() {
-  OH_NativeWindow_DestroyNativeWindow(nativeWindow);
+  if (ownsWindow && nativeWindow) {
+    OH_NativeWindow_DestroyNativeWindow(nativeWindow);
+  }
 }
 
 void GPUDrawable::updateSize() {
   OH_NativeWindow_NativeWindowHandleOpt(nativeWindow, GET_BUFFER_GEOMETRY, &_height, &_width);
-  if (window) {
-    window->invalidSize();
-  }
 }
 
 std::shared_ptr<tgfx::Device> GPUDrawable::getDevice() {
@@ -59,21 +58,22 @@ std::shared_ptr<tgfx::Device> GPUDrawable::getDevice() {
 }
 
 std::shared_ptr<tgfx::Surface> GPUDrawable::onCreateSurface(tgfx::Context* context) {
-  return window ? window->getSurface(context) : nullptr;
+  if (window == nullptr) {
+    return nullptr;
+  }
+  return tgfx::Surface::MakeFrom(context, window);
 }
 
 void GPUDrawable::onFreeSurface() {
-  if (window) {
-    window->freeSurface();
-  }
 }
 
-void GPUDrawable::present(tgfx::Context* context) {
+void GPUDrawable::present(tgfx::Context*) {
   if (window == nullptr) {
     return;
   }
   window->setPresentationTime(currentTimeStamp);
-  window->present(context);
+  // In the new tgfx architecture, Window::onPresent() is called automatically by
+  // DrawingBuffer::presentWindows() after command submission.
 }
 
 void GPUDrawable::setTimeStamp(int64_t timeStamp) {

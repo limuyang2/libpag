@@ -40,7 +40,7 @@ class PAGImageState internal constructor(
     private val onAnimationCancel: (() -> Unit)?,
     private val onAnimationRepeat: (() -> Unit)?,
     private val onAnimationUpdate: ((Int) -> Unit)?
-) {
+): PAGAnimator.Listener {
     // Configuration properties
     private  var _composition: PAGComposition ? = null
     private var _scaleMode: Int = PAGScaleMode.LetterBox
@@ -76,40 +76,9 @@ class PAGImageState internal constructor(
     private var isDispose = false
     private var memoryCacheStatusHasChanged = false
 
-    private val animatorListener: PAGAnimator.Listener = object : PAGAnimator.Listener {
-        override fun onAnimationStart(animator: PAGAnimator) {
-            onAnimationStart?.invoke()
-        }
-
-        override fun onAnimationEnd(animator: PAGAnimator) {
-            onAnimationEnd?.invoke()
-        }
-
-        override fun onAnimationCancel(animator: PAGAnimator) {
-            onAnimationCancel?.invoke()
-        }
-
-        override fun onAnimationRepeat(animator: PAGAnimator) {
-            onAnimationRepeat?.invoke()
-        }
-
-        override fun onAnimationUpdate(animator: PAGAnimator) {
-            if (isDispose) {
-                return
-            }
-            if (_composition != null) {
-                animator.setDuration(_composition!!.duration())
-            }
-            flush()
-            onAnimationUpdate?.invoke(_currentFrame)
-        }
-    }
-
-
-    private var animator: PAGAnimator = PAGAnimator.MakeFrom(context, animatorListener).apply {
+    private var animator: PAGAnimator = PAGAnimator.MakeFrom(context, this).apply {
         this.setRepeatCount(_repeatCount)
     }
-
 
     init {
 
@@ -142,6 +111,35 @@ class PAGImageState internal constructor(
         } else {
             throw IllegalArgumentException("PAGImageState: composition or path must be not null")
         }
+    }
+
+    // ==================== PAGAnimator.Listener ====================
+
+    override fun onAnimationStart(animator: PAGAnimator) {
+        onAnimationStart?.invoke()
+    }
+
+    override fun onAnimationEnd(animator: PAGAnimator) {
+        onAnimationEnd?.invoke()
+    }
+
+    override fun onAnimationCancel(animator: PAGAnimator) {
+        onAnimationCancel?.invoke()
+    }
+
+    override fun onAnimationRepeat(animator: PAGAnimator) {
+        onAnimationRepeat?.invoke()
+    }
+
+    override fun onAnimationUpdate(animator: PAGAnimator) {
+        if (isDispose) {
+            return
+        }
+        if (_composition != null) {
+            animator.setDuration(_composition!!.duration())
+        }
+        flush()
+        onAnimationUpdate?.invoke(_currentFrame)
     }
 
     // ==================== Public Methods ====================
