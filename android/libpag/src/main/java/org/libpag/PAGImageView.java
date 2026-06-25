@@ -158,9 +158,13 @@ public class PAGImageView extends View implements PAGAnimator.Listener {
      */
     public void setPathAsync(String path, float maxFrameRate, PAGFile.LoadListener listener) {
         NativeTask.Run(() -> {
-            setPath(path, maxFrameRate);
+            // Keep a local reference to the loaded composition. The _composition field may be reset
+            // to null by the render thread in initDecoderInfo() for path-loaded views, so reading it
+            // here would race and frequently return null to the callback.
+            PAGComposition composition = getCompositionFromPath(path);
+            refreshResource(path, composition, maxFrameRate);
             if (listener != null) {
-                listener.onLoad((PAGFile) _composition);
+                listener.onLoad(composition instanceof PAGFile ? (PAGFile) composition : null);
             }
         });
     }
@@ -678,9 +682,9 @@ public class PAGImageView extends View implements PAGAnimator.Listener {
                 flushBitmap.prepareToDraw();
             }
             renderBitmap = flushBitmap;
-        }
-        if (_cacheAllFramesInMemory && renderBitmap != null) {
-            bitmapCache.put(frame, renderBitmap);
+            if (_cacheAllFramesInMemory && flushBitmap != null) {
+                bitmapCache.put(frame, flushBitmap);
+            }
         }
         return true;
     }

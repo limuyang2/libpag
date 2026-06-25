@@ -39,6 +39,7 @@
 #include "tgfx/core/ImageCodec.h"
 #include "tgfx/core/Pixmap.h"
 #include "utils/Baseline.h"
+#include "utils/PAGXTestUtils.h"
 #include "utils/ProjectPath.h"
 #include "utils/TestDir.h"
 
@@ -101,15 +102,6 @@ static std::string ReadFile(const std::string& path) {
   return {std::istreambuf_iterator<char>(in), std::istreambuf_iterator<char>()};
 }
 
-static int CallRun(int (*fn)(int, char*[]), std::vector<std::string> args) {
-  std::vector<char*> argv = {};
-  argv.reserve(args.size());
-  for (auto& arg : args) {
-    argv.push_back(arg.data());
-  }
-  return fn(static_cast<int>(argv.size()), argv.data());
-}
-
 static std::string ExportToSVG(const std::string& pagxResourceName, const std::string& svgTempName,
                                std::vector<std::string> extraExportArgs = {}) {
   auto pagxPath = TestResourcePath(pagxResourceName);
@@ -159,11 +151,13 @@ CLI_TEST(PAGXCliTest, Format_AttributeReordering) {
   ASSERT_NE(namePos, std::string::npos);
   ASSERT_NE(alphaPos, std::string::npos);
   EXPECT_LT(namePos, alphaPos);
-  auto leftPos = output.find("left=");
-  auto sizePos = output.find("size=");
+  auto rectPos = output.find("<Rectangle");
+  ASSERT_NE(rectPos, std::string::npos);
+  auto leftPos = output.find("left=", rectPos);
+  auto widthPos = output.find("width=", rectPos);
   ASSERT_NE(leftPos, std::string::npos);
-  ASSERT_NE(sizePos, std::string::npos);
-  EXPECT_LT(leftPos, sizePos);
+  ASSERT_NE(widthPos, std::string::npos);
+  EXPECT_LT(leftPos, widthPos);
 }
 
 CLI_TEST(PAGXCliTest, Format_PreservesValues) {
@@ -627,7 +621,7 @@ CLI_TEST(PAGXCliTest, Verify_C10_ComplexPath) {
   std::cerr.rdbuf(old);
   auto output = oss.str();
   EXPECT_NE(ret, 0);
-  EXPECT_TRUE(output.find("verbs (> 500)") != std::string::npos);
+  EXPECT_TRUE(output.find("verbs (> 1024)") != std::string::npos);
 }
 
 CLI_TEST(PAGXCliTest, Verify_C11_LowOpacityHighCost) {
@@ -1076,8 +1070,7 @@ CLI_TEST(PAGXCliTest, Import_SvgToPagx_Gradient) {
 }
 
 CLI_TEST(PAGXCliTest, Import_SvgToPagx_Text) {
-  auto svgPath =
-      ExportToSVG("render_text.pagx", "ImportSVG_Text.svg", {"--svg-no-convert-text-to-path"});
+  auto svgPath = ExportToSVG("render_text.pagx", "ImportSVG_Text.svg");
   auto outputPath = TempDir() + "/ImportSVG_Text.pagx";
   auto ret = CallRun(pagx::cli::RunImport, {"import", "--input", svgPath, "--output", outputPath});
   EXPECT_EQ(ret, 0);
@@ -1220,11 +1213,127 @@ CLI_TEST(PAGXCliTest, Export_UnexpectedArgument) {
   EXPECT_NE(ret, 0);
 }
 
+//==============================================================================
+// Export tests — PAGX to PPTX
+//==============================================================================
+
+#ifdef PAG_BUILD_PPT
+
+CLI_TEST(PAGXCliTest, Export_PagxToPptx_Basic) {
+  auto inputPath = TestResourcePath("render_basic.pagx");
+  auto outputPath = TempDir() + "/ExportPPTX_Basic.pptx";
+  auto ret =
+      CallRun(pagx::cli::RunExport, {"export", "--input", inputPath, "--output", outputPath});
+  EXPECT_EQ(ret, 0);
+  EXPECT_TRUE(std::filesystem::exists(outputPath));
+  EXPECT_GT(std::filesystem::file_size(outputPath), 0u);
+}
+
+CLI_TEST(PAGXCliTest, Export_PagxToPptx_ForceFormat) {
+  auto inputPath = TestResourcePath("render_basic.pagx");
+  auto outputPath = TempDir() + "/ExportPPTX_ForceFormat.out";
+  auto ret = CallRun(pagx::cli::RunExport,
+                     {"export", "--format", "pptx", "--input", inputPath, "--output", outputPath});
+  EXPECT_EQ(ret, 0);
+  EXPECT_TRUE(std::filesystem::exists(outputPath));
+  EXPECT_GT(std::filesystem::file_size(outputPath), 0u);
+}
+
+CLI_TEST(PAGXCliTest, Export_PagxToPptx_Gradient) {
+  auto inputPath = TestResourcePath("render_gradient.pagx");
+  auto outputPath = TempDir() + "/ExportPPTX_Gradient.pptx";
+  auto ret =
+      CallRun(pagx::cli::RunExport, {"export", "--input", inputPath, "--output", outputPath});
+  EXPECT_EQ(ret, 0);
+  EXPECT_TRUE(std::filesystem::exists(outputPath));
+  EXPECT_GT(std::filesystem::file_size(outputPath), 0u);
+}
+
+CLI_TEST(PAGXCliTest, Export_PagxToPptx_Text) {
+  auto inputPath = TestResourcePath("render_text.pagx");
+  auto outputPath = TempDir() + "/ExportPPTX_Text.pptx";
+  auto ret =
+      CallRun(pagx::cli::RunExport, {"export", "--input", inputPath, "--output", outputPath});
+  EXPECT_EQ(ret, 0);
+  EXPECT_TRUE(std::filesystem::exists(outputPath));
+}
+
+CLI_TEST(PAGXCliTest, Export_PagxToPptx_NoConvertTextToPath) {
+  auto inputPath = TestResourcePath("render_text.pagx");
+  auto outputPath = TempDir() + "/ExportPPTX_NoText2Path.pptx";
+  auto ret =
+      CallRun(pagx::cli::RunExport, {"export", "--input", inputPath, "--output", outputPath});
+  EXPECT_EQ(ret, 0);
+  EXPECT_TRUE(std::filesystem::exists(outputPath));
+  EXPECT_GT(std::filesystem::file_size(outputPath), 0u);
+}
+
+CLI_TEST(PAGXCliTest, Export_PagxToPptx_NoBakeUnsupported) {
+  auto inputPath = TestResourcePath("verify_simple.pagx");
+  auto outputPath = TempDir() + "/ExportPPTX_NoBakeUnsupported.pptx";
+  auto ret = CallRun(pagx::cli::RunExport, {"export", "--ppt-no-bake-unsupported", "--input",
+                                            inputPath, "--output", outputPath});
+  EXPECT_EQ(ret, 0);
+  EXPECT_TRUE(std::filesystem::exists(outputPath));
+}
+
+CLI_TEST(PAGXCliTest, Export_PagxToPptx_MissingFile) {
+  auto outputPath = TempDir() + "/ExportPPTX_Missing.pptx";
+  auto ret = CallRun(pagx::cli::RunExport,
+                     {"export", "--input", "nonexistent.pagx", "--output", outputPath});
+  EXPECT_NE(ret, 0);
+}
+
+CLI_TEST(PAGXCliTest, Export_PagxToPptx_InvalidFile) {
+  auto inputPath = TestResourcePath("verify_not_xml.pagx");
+  auto outputPath = TempDir() + "/ExportPPTX_Invalid.pptx";
+  auto ret =
+      CallRun(pagx::cli::RunExport, {"export", "--input", inputPath, "--output", outputPath});
+  EXPECT_NE(ret, 0);
+}
+
+CLI_TEST(PAGXCliTest, Export_PagxToPptx_DefaultOutput) {
+  auto inputPath = CopyToTemp("render_basic.pagx", "ExportPPTXDefault.pagx");
+  auto ret = CallRun(pagx::cli::RunExport, {"export", "--format", "pptx", "--input", inputPath});
+  EXPECT_EQ(ret, 0);
+  auto defaultOutput = TempDir() + "/ExportPPTXDefault.pptx";
+  EXPECT_TRUE(std::filesystem::exists(defaultOutput));
+}
+
+CLI_TEST(PAGXCliTest, Export_PagxToPptx_WriteFailure) {
+  auto inputPath = TestResourcePath("render_basic.pagx");
+  auto outputPath = "/nonexistent_dir_xyz/output.pptx";
+  auto ret =
+      CallRun(pagx::cli::RunExport, {"export", "--input", inputPath, "--output", outputPath});
+  EXPECT_NE(ret, 0);
+}
+
+CLI_TEST(PAGXCliTest, Export_PagxToPptx_Scale) {
+  auto inputPath = TestResourcePath("render_scale.pagx");
+  auto outputPath = TempDir() + "/ExportPPTX_Scale.pptx";
+  auto ret =
+      CallRun(pagx::cli::RunExport, {"export", "--input", inputPath, "--output", outputPath});
+  EXPECT_EQ(ret, 0);
+  EXPECT_TRUE(std::filesystem::exists(outputPath));
+}
+
+CLI_TEST(PAGXCliTest, Export_PagxToPptx_ValidateSimple) {
+  auto inputPath = TestResourcePath("verify_simple.pagx");
+  auto outputPath = TempDir() + "/ExportPPTX_ValidateSimple.pptx";
+  auto ret =
+      CallRun(pagx::cli::RunExport, {"export", "--input", inputPath, "--output", outputPath});
+  EXPECT_EQ(ret, 0);
+  EXPECT_TRUE(std::filesystem::exists(outputPath));
+  EXPECT_GT(std::filesystem::file_size(outputPath), 0u);
+}
+
+#endif  // PAG_BUILD_PPT
+
 CLI_TEST(PAGXCliTest, Export_NoConvertTextToPath) {
   auto inputPath = TestResourcePath("render_text.pagx");
   auto outputPath = TempDir() + "/ExportSVG_NoConvertText.svg";
-  auto ret = CallRun(pagx::cli::RunExport, {"export", "--svg-no-convert-text-to-path", "--input",
-                                            inputPath, "--output", outputPath});
+  auto ret =
+      CallRun(pagx::cli::RunExport, {"export", "--input", inputPath, "--output", outputPath});
   EXPECT_EQ(ret, 0);
   auto output = ReadFile(outputPath);
   EXPECT_NE(output.find("<svg"), std::string::npos);
@@ -2639,7 +2748,7 @@ CLI_TEST(PAGXCliTest, Verify_PainterLeakClean) {
   auto ret = CallRun(pagx::cli::RunVerify, {"verify", "--skip-render", "--skip-layout", inputPath});
   std::cerr.rdbuf(old);
   auto output = oss.str();
-  EXPECT_NE(ret, 0);
+  EXPECT_EQ(ret, 0);
   EXPECT_EQ(output.find("painter leaks geometry"), std::string::npos);
 }
 

@@ -1,0 +1,2277 @@
+/////////////////////////////////////////////////////////////////////////////////////////////////
+//
+//  Tencent is pleased to support the open source community by making libpag available.
+//
+//  Copyright (C) 2026 Tencent. All rights reserved.
+//
+//  Licensed under the Apache License, Version 2.0 (the "License"); you may not use this file
+//  except in compliance with the License. You may obtain a copy of the License at
+//
+//      http://www.apache.org/licenses/LICENSE-2.0
+//
+//  unless required by applicable law or agreed to in writing, software distributed under the
+//  license is distributed on an "as is" basis, without warranties or conditions of any kind,
+//  either express or implied. see the license for the specific language governing permissions
+//  and limitations under the license.
+//
+/////////////////////////////////////////////////////////////////////////////////////////////////
+
+#include <cmath>
+#include <cstring>
+#include <fstream>
+#include "pagx/PAGXDocument.h"
+#include "pagx/nodes/ConicGradient.h"
+#include "pagx/nodes/DiamondGradient.h"
+#include "pagx/nodes/Fill.h"
+#include "pagx/nodes/Font.h"
+#include "pagx/nodes/GlyphRun.h"
+#include "pagx/nodes/Group.h"
+#include "pagx/nodes/Image.h"
+#include "pagx/nodes/Layer.h"
+#include "pagx/nodes/PathData.h"
+#include "pagx/nodes/SolidColor.h"
+#include "pagx/nodes/Stroke.h"
+#include "pagx/nodes/Text.h"
+#include "pagx/nodes/TextBox.h"
+#include "pagx/nodes/TextModifier.h"
+#include "pagx/nodes/TextPath.h"
+#include "pagx/svg/SVGFeatureProbe.h"
+#include "pagx/svg/SVGPathParser.h"
+#include "pagx/utils/ExporterUtils.h"
+#include "pagx/utils/ImageFormatUtils.h"
+#include "pagx/utils/StrokeGeometryUtils.h"
+#include "pagx/utils/TextUtils.h"
+#include "utils/TestUtils.h"
+
+namespace pag {
+
+// ---------------------------------------------------------------------------
+// CollectFillStroke
+// ---------------------------------------------------------------------------
+
+PAGX_TEST(PAGXUtilsTest, CollectFillStroke_Empty) {
+  std::vector<pagx::Element*> contents;
+  auto info = pagx::CollectFillStroke(contents);
+  EXPECT_EQ(info.fill, nullptr);
+  EXPECT_EQ(info.stroke, nullptr);
+  EXPECT_EQ(info.textBox, nullptr);
+}
+
+PAGX_TEST(PAGXUtilsTest, CollectFillStroke_FillOnly) {
+  auto doc = pagx::PAGXDocument::Make(100, 100);
+  auto fill = doc->makeNode<pagx::Fill>();
+  std::vector<pagx::Element*> contents = {fill};
+  auto info = pagx::CollectFillStroke(contents);
+  EXPECT_EQ(info.fill, fill);
+  EXPECT_EQ(info.stroke, nullptr);
+  EXPECT_EQ(info.textBox, nullptr);
+}
+
+PAGX_TEST(PAGXUtilsTest, CollectFillStroke_StrokeOnly) {
+  auto doc = pagx::PAGXDocument::Make(100, 100);
+  auto stroke = doc->makeNode<pagx::Stroke>();
+  std::vector<pagx::Element*> contents = {stroke};
+  auto info = pagx::CollectFillStroke(contents);
+  EXPECT_EQ(info.fill, nullptr);
+  EXPECT_EQ(info.stroke, stroke);
+  EXPECT_EQ(info.textBox, nullptr);
+}
+
+PAGX_TEST(PAGXUtilsTest, CollectFillStroke_AllTypes) {
+  auto doc = pagx::PAGXDocument::Make(100, 100);
+  auto fill = doc->makeNode<pagx::Fill>();
+  auto stroke = doc->makeNode<pagx::Stroke>();
+  auto textBox = doc->makeNode<pagx::TextBox>();
+  std::vector<pagx::Element*> contents = {fill, stroke, textBox};
+  auto info = pagx::CollectFillStroke(contents);
+  EXPECT_EQ(info.fill, fill);
+  EXPECT_EQ(info.stroke, stroke);
+  EXPECT_EQ(info.textBox, textBox);
+}
+
+PAGX_TEST(PAGXUtilsTest, CollectFillStroke_FirstOfEachType) {
+  auto doc = pagx::PAGXDocument::Make(100, 100);
+  auto fill1 = doc->makeNode<pagx::Fill>();
+  auto fill2 = doc->makeNode<pagx::Fill>();
+  auto stroke1 = doc->makeNode<pagx::Stroke>();
+  auto stroke2 = doc->makeNode<pagx::Stroke>();
+  std::vector<pagx::Element*> contents = {fill1, stroke1, fill2, stroke2};
+  auto info = pagx::CollectFillStroke(contents);
+  EXPECT_EQ(info.fill, fill1);
+  EXPECT_EQ(info.stroke, stroke1);
+}
+
+// ---------------------------------------------------------------------------
+// BuildLayerMatrix
+// ---------------------------------------------------------------------------
+
+PAGX_TEST(PAGXUtilsTest, BuildLayerMatrix_Identity) {
+  auto doc = pagx::PAGXDocument::Make(100, 100);
+  auto layer = doc->makeNode<pagx::Layer>();
+  auto m = pagx::BuildLayerMatrix(layer);
+  EXPECT_TRUE(m.isIdentity());
+}
+
+PAGX_TEST(PAGXUtilsTest, BuildLayerMatrix_WithPosition) {
+  auto doc = pagx::PAGXDocument::Make(100, 100);
+  auto layer = doc->makeNode<pagx::Layer>();
+  layer->x = 10.0f;
+  layer->y = 20.0f;
+  // BuildLayerMatrix consumes the layout-resolved renderPosition(); run the layer's measure pass
+  // so the authored x/y propagate into preferredX/Y (and therefore layoutBounds()).
+  layer->updateSize(nullptr);
+  auto m = pagx::BuildLayerMatrix(layer);
+  EXPECT_FLOAT_EQ(m.tx, 10.0f);
+  EXPECT_FLOAT_EQ(m.ty, 20.0f);
+}
+
+PAGX_TEST(PAGXUtilsTest, BuildLayerMatrix_WithMatrixAndPosition) {
+  auto doc = pagx::PAGXDocument::Make(100, 100);
+  auto layer = doc->makeNode<pagx::Layer>();
+  layer->matrix = pagx::Matrix::Scale(2.0f, 3.0f);
+  layer->x = 5.0f;
+  layer->y = 7.0f;
+  layer->updateSize(nullptr);
+  auto m = pagx::BuildLayerMatrix(layer);
+  auto expected = pagx::Matrix::Translate(5.0f, 7.0f) * pagx::Matrix::Scale(2.0f, 3.0f);
+  EXPECT_FLOAT_EQ(m.a, expected.a);
+  EXPECT_FLOAT_EQ(m.d, expected.d);
+  EXPECT_FLOAT_EQ(m.tx, expected.tx);
+  EXPECT_FLOAT_EQ(m.ty, expected.ty);
+}
+
+PAGX_TEST(PAGXUtilsTest, BuildLayerMatrix_OnlyXNonZero) {
+  auto doc = pagx::PAGXDocument::Make(100, 100);
+  auto layer = doc->makeNode<pagx::Layer>();
+  layer->x = 15.0f;
+  layer->updateSize(nullptr);
+  auto m = pagx::BuildLayerMatrix(layer);
+  EXPECT_FLOAT_EQ(m.tx, 15.0f);
+  EXPECT_FLOAT_EQ(m.ty, 0.0f);
+}
+
+// ---------------------------------------------------------------------------
+// BuildGroupMatrix
+// ---------------------------------------------------------------------------
+
+PAGX_TEST(PAGXUtilsTest, BuildGroupMatrix_Identity) {
+  auto doc = pagx::PAGXDocument::Make(100, 100);
+  auto group = doc->makeNode<pagx::Group>();
+  auto m = pagx::BuildGroupMatrix(group);
+  EXPECT_TRUE(m.isIdentity());
+}
+
+PAGX_TEST(PAGXUtilsTest, BuildGroupMatrix_PositionOnly) {
+  auto doc = pagx::PAGXDocument::Make(100, 100);
+  auto group = doc->makeNode<pagx::Group>();
+  group->position = {50.0f, 30.0f};
+  // BuildGroupMatrix translates by renderPosition(); run the group's measure pass so the authored
+  // position propagates into preferredX/Y (and therefore layoutBounds()).
+  group->updateSize(nullptr);
+  auto m = pagx::BuildGroupMatrix(group);
+  EXPECT_FLOAT_EQ(m.tx, 50.0f);
+  EXPECT_FLOAT_EQ(m.ty, 30.0f);
+}
+
+PAGX_TEST(PAGXUtilsTest, BuildGroupMatrix_ScaleOnly) {
+  auto doc = pagx::PAGXDocument::Make(100, 100);
+  auto group = doc->makeNode<pagx::Group>();
+  group->scale = {2.0f, 3.0f};
+  auto m = pagx::BuildGroupMatrix(group);
+  EXPECT_FLOAT_EQ(m.a, 2.0f);
+  EXPECT_FLOAT_EQ(m.d, 3.0f);
+}
+
+PAGX_TEST(PAGXUtilsTest, BuildGroupMatrix_RotationOnly) {
+  auto doc = pagx::PAGXDocument::Make(100, 100);
+  auto group = doc->makeNode<pagx::Group>();
+  group->rotation = 90.0f;
+  auto m = pagx::BuildGroupMatrix(group);
+  auto expected = pagx::Matrix::Rotate(90.0f);
+  EXPECT_NEAR(m.a, expected.a, 1e-5f);
+  EXPECT_NEAR(m.b, expected.b, 1e-5f);
+  EXPECT_NEAR(m.c, expected.c, 1e-5f);
+  EXPECT_NEAR(m.d, expected.d, 1e-5f);
+}
+
+PAGX_TEST(PAGXUtilsTest, BuildGroupMatrix_AnchorOnly) {
+  auto doc = pagx::PAGXDocument::Make(100, 100);
+  auto group = doc->makeNode<pagx::Group>();
+  group->anchor = {25.0f, 25.0f};
+  auto m = pagx::BuildGroupMatrix(group);
+  EXPECT_FLOAT_EQ(m.tx, -25.0f);
+  EXPECT_FLOAT_EQ(m.ty, -25.0f);
+}
+
+PAGX_TEST(PAGXUtilsTest, BuildGroupMatrix_SkewOnly) {
+  auto doc = pagx::PAGXDocument::Make(100, 100);
+  auto group = doc->makeNode<pagx::Group>();
+  group->skew = 30.0f;
+  auto m = pagx::BuildGroupMatrix(group);
+  EXPECT_FALSE(m.isIdentity());
+  // Lock the sign convention. The native renderer (ShapeRenderer::SkewFromAxis) feeds
+  // `DegreesToRadians(-skew)` into the shear matrix; with skewAxis=0 and a positive `skew`,
+  // the resulting m.c is tan(-skew) < 0. SVG/PPT/HTML all share the same convention. A
+  // regression that flips back to `+skew` (the legacy convention) would make m.c positive and
+  // produce shear in the opposite direction — visually obvious in renders but invisible to
+  // !isIdentity() alone, so assert the sign explicitly.
+  EXPECT_LT(m.c, 0.0f);
+  constexpr float kRad = static_cast<float>(M_PI) / 180.0f;
+  EXPECT_NEAR(m.c, std::tan(-group->skew * kRad), 1e-5f);
+}
+
+PAGX_TEST(PAGXUtilsTest, BuildGroupMatrix_AnchorPositionScaleRotation) {
+  auto doc = pagx::PAGXDocument::Make(100, 100);
+  auto group = doc->makeNode<pagx::Group>();
+  group->anchor = {10.0f, 10.0f};
+  group->position = {100.0f, 100.0f};
+  group->scale = {2.0f, 2.0f};
+  group->rotation = 45.0f;
+  group->updateSize(nullptr);
+  auto m = pagx::BuildGroupMatrix(group);
+  EXPECT_FLOAT_EQ(m.tx, 100.0f);
+  EXPECT_FLOAT_EQ(m.ty, 100.0f - 20.0f * std::sqrt(2.0f));
+  EXPECT_FALSE(m.isIdentity());
+}
+
+// ---------------------------------------------------------------------------
+// GetPNGDimensions
+// ---------------------------------------------------------------------------
+
+PAGX_TEST(PAGXUtilsTest, GetPNGDimensions_ValidPNG) {
+  // Minimal 1x1 PNG header (24 bytes needed)
+  uint8_t png[] = {0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A,  // PNG signature
+                   0x00, 0x00, 0x00, 0x0D,                          // IHDR chunk length
+                   0x49, 0x48, 0x44, 0x52,                          // "IHDR"
+                   0x00, 0x00, 0x00, 0x01,                          // width = 1
+                   0x00, 0x00, 0x00, 0x01};                         // height = 1
+  int w = 0, h = 0;
+  EXPECT_TRUE(pagx::GetPNGDimensions(png, sizeof(png), &w, &h));
+  EXPECT_EQ(w, 1);
+  EXPECT_EQ(h, 1);
+}
+
+PAGX_TEST(PAGXUtilsTest, GetPNGDimensions_LargerSize) {
+  uint8_t png[] = {0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A, 0x00, 0x00,
+                   0x00, 0x0D, 0x49, 0x48, 0x44, 0x52, 0x00, 0x00, 0x01, 0x00,  // width = 256
+                   0x00, 0x00, 0x00, 0x80};                                     // height = 128
+  int w = 0, h = 0;
+  EXPECT_TRUE(pagx::GetPNGDimensions(png, sizeof(png), &w, &h));
+  EXPECT_EQ(w, 256);
+  EXPECT_EQ(h, 128);
+}
+
+PAGX_TEST(PAGXUtilsTest, GetPNGDimensions_TooSmall) {
+  uint8_t data[] = {0x89, 0x50, 0x4E, 0x47};
+  int w = 0, h = 0;
+  EXPECT_FALSE(pagx::GetPNGDimensions(data, sizeof(data), &w, &h));
+}
+
+PAGX_TEST(PAGXUtilsTest, GetPNGDimensions_InvalidSignature) {
+  uint8_t data[24] = {};
+  data[0] = 0xFF;
+  int w = 0, h = 0;
+  EXPECT_FALSE(pagx::GetPNGDimensions(data, sizeof(data), &w, &h));
+}
+
+PAGX_TEST(PAGXUtilsTest, GetPNGDimensions_ZeroWidth) {
+  uint8_t png[] = {0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A, 0x00, 0x00,
+                   0x00, 0x0D, 0x49, 0x48, 0x44, 0x52, 0x00, 0x00, 0x00, 0x00,  // width = 0
+                   0x00, 0x00, 0x00, 0x01};                                     // height = 1
+  int w = 0, h = 0;
+  EXPECT_FALSE(pagx::GetPNGDimensions(png, sizeof(png), &w, &h));
+}
+
+PAGX_TEST(PAGXUtilsTest, GetPNGDimensions_ZeroHeight) {
+  uint8_t png[] = {0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A, 0x00, 0x00,
+                   0x00, 0x0D, 0x49, 0x48, 0x44, 0x52, 0x00, 0x00, 0x00, 0x01,  // width = 1
+                   0x00, 0x00, 0x00, 0x00};                                     // height = 0
+  int w = 0, h = 0;
+  EXPECT_FALSE(pagx::GetPNGDimensions(png, sizeof(png), &w, &h));
+}
+
+// ---------------------------------------------------------------------------
+// GetJPEGDimensions
+// ---------------------------------------------------------------------------
+
+PAGX_TEST(PAGXUtilsTest, GetJPEGDimensions_TooSmall) {
+  uint8_t data[] = {0xFF};
+  int w = 0, h = 0;
+  EXPECT_FALSE(pagx::GetJPEGDimensions(data, sizeof(data), &w, &h));
+}
+
+PAGX_TEST(PAGXUtilsTest, GetJPEGDimensions_InvalidHeader) {
+  uint8_t data[] = {0x00, 0x00};
+  int w = 0, h = 0;
+  EXPECT_FALSE(pagx::GetJPEGDimensions(data, sizeof(data), &w, &h));
+}
+
+PAGX_TEST(PAGXUtilsTest, GetJPEGDimensions_ValidSOF0) {
+  // Construct minimal JPEG with SOF0 marker
+  uint8_t data[] = {
+      0xFF, 0xD8,        // SOI
+      0xFF, 0xC0,        // SOF0 marker
+      0x00, 0x11,        // segment length = 17
+      0x08,              // precision = 8 bits
+      0x00, 0x64,        // height = 100
+      0x00, 0xC8,        // width = 200
+      0x03,              // number of components
+      0x01, 0x11, 0x00,  // component 1
+      0x02, 0x11, 0x01,  // component 2
+      0x03, 0x11, 0x01,  // component 3
+  };
+  int w = 0, h = 0;
+  EXPECT_TRUE(pagx::GetJPEGDimensions(data, sizeof(data), &w, &h));
+  EXPECT_EQ(w, 200);
+  EXPECT_EQ(h, 100);
+}
+
+PAGX_TEST(PAGXUtilsTest, GetJPEGDimensions_SOF2Progressive) {
+  uint8_t data[] = {
+      0xFF, 0xD8,  // SOI
+      0xFF, 0xC2,  // SOF2 (progressive)
+      0x00, 0x11,  // segment length
+      0x08,        // precision
+      0x00, 0x50,  // height = 80
+      0x00, 0x60,  // width = 96
+      0x03, 0x01, 0x11, 0x00, 0x02, 0x11, 0x01, 0x03, 0x11, 0x01,
+  };
+  int w = 0, h = 0;
+  EXPECT_TRUE(pagx::GetJPEGDimensions(data, sizeof(data), &w, &h));
+  EXPECT_EQ(w, 96);
+  EXPECT_EQ(h, 80);
+}
+
+PAGX_TEST(PAGXUtilsTest, GetJPEGDimensions_SkipsNonSOFSegments) {
+  // APP0 marker followed by SOF0
+  uint8_t data[] = {
+      0xFF, 0xD8,        // SOI
+      0xFF, 0xE0,        // APP0
+      0x00, 0x04,        // segment length = 4 (includes length bytes)
+      0x00, 0x00,        // dummy data
+      0xFF, 0xC0,        // SOF0
+      0x00, 0x11, 0x08,  // length + precision
+      0x00, 0x30,        // height = 48
+      0x00, 0x40,        // width = 64
+      0x03, 0x01, 0x11, 0x00, 0x02, 0x11, 0x01, 0x03, 0x11, 0x01,
+  };
+  int w = 0, h = 0;
+  EXPECT_TRUE(pagx::GetJPEGDimensions(data, sizeof(data), &w, &h));
+  EXPECT_EQ(w, 64);
+  EXPECT_EQ(h, 48);
+}
+
+PAGX_TEST(PAGXUtilsTest, GetJPEGDimensions_HitsSOS) {
+  // SOS marker before any SOF => no dimensions
+  uint8_t data[] = {
+      0xFF, 0xD8,  // SOI
+      0xFF, 0xDA,  // SOS
+      0x00, 0x04, 0x00, 0x00,
+  };
+  int w = 0, h = 0;
+  EXPECT_FALSE(pagx::GetJPEGDimensions(data, sizeof(data), &w, &h));
+}
+
+PAGX_TEST(PAGXUtilsTest, GetJPEGDimensions_HitsEOI) {
+  uint8_t data[] = {
+      0xFF, 0xD8,  // SOI
+      0xFF, 0xD9,  // EOI
+  };
+  int w = 0, h = 0;
+  EXPECT_FALSE(pagx::GetJPEGDimensions(data, sizeof(data), &w, &h));
+}
+
+PAGX_TEST(PAGXUtilsTest, GetJPEGDimensions_InvalidMarkerByte) {
+  uint8_t data[] = {
+      0xFF, 0xD8,  // SOI
+      0x00, 0xC0,  // invalid: first byte should be 0xFF
+  };
+  int w = 0, h = 0;
+  EXPECT_FALSE(pagx::GetJPEGDimensions(data, sizeof(data), &w, &h));
+}
+
+// ---------------------------------------------------------------------------
+// IsJPEG
+// ---------------------------------------------------------------------------
+
+PAGX_TEST(PAGXUtilsTest, IsJPEG_Valid) {
+  uint8_t data[] = {0xFF, 0xD8, 0xFF, 0xE0};
+  EXPECT_TRUE(pagx::IsJPEG(data, sizeof(data)));
+}
+
+PAGX_TEST(PAGXUtilsTest, IsJPEG_TooSmall) {
+  uint8_t data[] = {0xFF};
+  EXPECT_FALSE(pagx::IsJPEG(data, sizeof(data)));
+}
+
+PAGX_TEST(PAGXUtilsTest, IsJPEG_InvalidFirstByte) {
+  uint8_t data[] = {0x00, 0xD8};
+  EXPECT_FALSE(pagx::IsJPEG(data, sizeof(data)));
+}
+
+PAGX_TEST(PAGXUtilsTest, IsJPEG_InvalidSecondByte) {
+  uint8_t data[] = {0xFF, 0x00};
+  EXPECT_FALSE(pagx::IsJPEG(data, sizeof(data)));
+}
+
+PAGX_TEST(PAGXUtilsTest, IsJPEG_EmptyBuffer) {
+  EXPECT_FALSE(pagx::IsJPEG(nullptr, 0));
+}
+
+// ---------------------------------------------------------------------------
+// DecomposeScale
+// ---------------------------------------------------------------------------
+
+PAGX_TEST(PAGXUtilsTest, DecomposeScale_Identity) {
+  pagx::Matrix m = {};
+  m.a = 1.0f;
+  m.d = 1.0f;
+  float sx = -1.0f;
+  float sy = -1.0f;
+  pagx::DecomposeScale(m, &sx, &sy);
+  EXPECT_NEAR(sx, 1.0f, 1e-5f);
+  EXPECT_NEAR(sy, 1.0f, 1e-5f);
+}
+
+PAGX_TEST(PAGXUtilsTest, DecomposeScale_UniformScale) {
+  pagx::Matrix m = {};
+  m.a = 2.0f;
+  m.d = 2.0f;
+  float sx = 0.0f;
+  float sy = 0.0f;
+  pagx::DecomposeScale(m, &sx, &sy);
+  EXPECT_NEAR(sx, 2.0f, 1e-5f);
+  EXPECT_NEAR(sy, 2.0f, 1e-5f);
+}
+
+PAGX_TEST(PAGXUtilsTest, DecomposeScale_NonUniformScale) {
+  pagx::Matrix m = {};
+  m.a = 3.0f;
+  m.d = 5.0f;
+  float sx = 0.0f;
+  float sy = 0.0f;
+  pagx::DecomposeScale(m, &sx, &sy);
+  EXPECT_NEAR(sx, 3.0f, 1e-5f);
+  EXPECT_NEAR(sy, 5.0f, 1e-5f);
+}
+
+PAGX_TEST(PAGXUtilsTest, DecomposeScale_Rotation90) {
+  // 90-degree rotation: a=0, b=1, c=-1, d=0
+  pagx::Matrix m = {};
+  m.a = 0.0f;
+  m.b = 1.0f;
+  m.c = -1.0f;
+  m.d = 0.0f;
+  float sx = 0.0f;
+  float sy = 0.0f;
+  pagx::DecomposeScale(m, &sx, &sy);
+  EXPECT_NEAR(sx, 1.0f, 1e-5f);
+  EXPECT_NEAR(sy, 1.0f, 1e-5f);
+}
+
+PAGX_TEST(PAGXUtilsTest, DecomposeScale_RotatedAndScaled) {
+  // Rotate 45 degrees and scale by 2.
+  float c = std::cos(static_cast<float>(M_PI) / 4.0f) * 2.0f;
+  float s = std::sin(static_cast<float>(M_PI) / 4.0f) * 2.0f;
+  pagx::Matrix m = {};
+  m.a = c;
+  m.b = s;
+  m.c = -s;
+  m.d = c;
+  float sx = 0.0f;
+  float sy = 0.0f;
+  pagx::DecomposeScale(m, &sx, &sy);
+  EXPECT_NEAR(sx, 2.0f, 1e-5f);
+  EXPECT_NEAR(sy, 2.0f, 1e-5f);
+}
+
+PAGX_TEST(PAGXUtilsTest, DecomposeScale_MirroredHorizontally) {
+  // Horizontal mirror: a=-1, d=1.  sx is the magnitude of (a,b), sy stays positive.
+  pagx::Matrix m = {};
+  m.a = -1.0f;
+  m.d = 1.0f;
+  float sx = 0.0f;
+  float sy = 0.0f;
+  pagx::DecomposeScale(m, &sx, &sy);
+  EXPECT_NEAR(sx, 1.0f, 1e-5f);
+  EXPECT_NEAR(sy, 1.0f, 1e-5f);
+}
+
+PAGX_TEST(PAGXUtilsTest, DecomposeScale_Degenerate) {
+  // A fully zero matrix collapses both axes; sx and sy should report zero.
+  pagx::Matrix m = {};
+  m.a = 0.0f;
+  m.b = 0.0f;
+  m.c = 0.0f;
+  m.d = 0.0f;
+  float sx = 1.0f;
+  float sy = 1.0f;
+  pagx::DecomposeScale(m, &sx, &sy);
+  EXPECT_EQ(sx, 0.0f);
+  EXPECT_EQ(sy, 0.0f);
+}
+
+// ---------------------------------------------------------------------------
+// HasNonASCII
+// ---------------------------------------------------------------------------
+
+PAGX_TEST(PAGXUtilsTest, HasNonASCII_Empty) {
+  EXPECT_FALSE(pagx::HasNonASCII(""));
+}
+
+PAGX_TEST(PAGXUtilsTest, HasNonASCII_PureASCII) {
+  EXPECT_FALSE(pagx::HasNonASCII("Hello World 123!@#"));
+}
+
+PAGX_TEST(PAGXUtilsTest, HasNonASCII_WithUTF8) {
+  EXPECT_TRUE(pagx::HasNonASCII("\xc3\xa9"));  // é
+}
+
+PAGX_TEST(PAGXUtilsTest, HasNonASCII_WithChinese) {
+  EXPECT_TRUE(pagx::HasNonASCII("\xe4\xb8\xad\xe6\x96\x87"));  // 中文
+}
+
+PAGX_TEST(PAGXUtilsTest, HasNonASCII_HighByte) {
+  std::string s(1, static_cast<char>(0x80));
+  EXPECT_TRUE(pagx::HasNonASCII(s));
+}
+
+PAGX_TEST(PAGXUtilsTest, HasNonASCII_MaxASCII) {
+  std::string s(1, static_cast<char>(127));
+  EXPECT_FALSE(pagx::HasNonASCII(s));
+}
+
+// ---------------------------------------------------------------------------
+// UTF8ToUTF16BEHex
+// ---------------------------------------------------------------------------
+
+PAGX_TEST(PAGXUtilsTest, UTF8ToUTF16BEHex_Empty) {
+  EXPECT_EQ(pagx::UTF8ToUTF16BEHex(""), "");
+}
+
+PAGX_TEST(PAGXUtilsTest, UTF8ToUTF16BEHex_ASCII) {
+  EXPECT_EQ(pagx::UTF8ToUTF16BEHex("A"), "0041");
+  EXPECT_EQ(pagx::UTF8ToUTF16BEHex("AB"), "00410042");
+}
+
+PAGX_TEST(PAGXUtilsTest, UTF8ToUTF16BEHex_TwoByte) {
+  // é = U+00E9, UTF-8: C3 A9
+  EXPECT_EQ(pagx::UTF8ToUTF16BEHex("\xc3\xa9"), "00E9");
+}
+
+PAGX_TEST(PAGXUtilsTest, UTF8ToUTF16BEHex_ThreeByte) {
+  // 中 = U+4E2D, UTF-8: E4 B8 AD
+  EXPECT_EQ(pagx::UTF8ToUTF16BEHex("\xe4\xb8\xad"), "4E2D");
+}
+
+PAGX_TEST(PAGXUtilsTest, UTF8ToUTF16BEHex_FourByteSurrogatePair) {
+  // 𝄞 = U+1D11E (Musical Symbol G Clef), UTF-8: F0 9D 84 9E
+  // UTF-16 surrogate pair: D834 DD1E
+  EXPECT_EQ(pagx::UTF8ToUTF16BEHex("\xf0\x9d\x84\x9e"), "D834DD1E");
+}
+
+PAGX_TEST(PAGXUtilsTest, UTF8ToUTF16BEHex_Mixed) {
+  // "A中" = U+0041 U+4E2D
+  EXPECT_EQ(pagx::UTF8ToUTF16BEHex("A\xe4\xb8\xad"), "00414E2D");
+}
+
+// ---------------------------------------------------------------------------
+// StripQuotes
+// ---------------------------------------------------------------------------
+
+PAGX_TEST(PAGXUtilsTest, StripQuotes_Quoted) {
+  EXPECT_EQ(pagx::StripQuotes("\"hello\""), "hello");
+}
+
+PAGX_TEST(PAGXUtilsTest, StripQuotes_NotQuoted) {
+  EXPECT_EQ(pagx::StripQuotes("hello"), "hello");
+}
+
+PAGX_TEST(PAGXUtilsTest, StripQuotes_Empty) {
+  EXPECT_EQ(pagx::StripQuotes(""), "");
+}
+
+PAGX_TEST(PAGXUtilsTest, StripQuotes_SingleQuote) {
+  EXPECT_EQ(pagx::StripQuotes("\""), "\"");
+}
+
+PAGX_TEST(PAGXUtilsTest, StripQuotes_EmptyQuoted) {
+  EXPECT_EQ(pagx::StripQuotes("\"\""), "");
+}
+
+PAGX_TEST(PAGXUtilsTest, StripQuotes_OnlyFrontQuote) {
+  EXPECT_EQ(pagx::StripQuotes("\"hello"), "\"hello");
+}
+
+PAGX_TEST(PAGXUtilsTest, StripQuotes_OnlyBackQuote) {
+  EXPECT_EQ(pagx::StripQuotes("hello\""), "hello\"");
+}
+
+PAGX_TEST(PAGXUtilsTest, StripQuotes_NestedQuotes) {
+  EXPECT_EQ(pagx::StripQuotes("\"say \"hi\"\""), "say \"hi\"");
+}
+
+// ---------------------------------------------------------------------------
+// DetectMaskFillRule
+// ---------------------------------------------------------------------------
+
+PAGX_TEST(PAGXUtilsTest, DetectMaskFillRule_DefaultWinding) {
+  auto doc = pagx::PAGXDocument::Make(100, 100);
+  auto layer = doc->makeNode<pagx::Layer>();
+  EXPECT_EQ(pagx::DetectMaskFillRule(layer), pagx::FillRule::Winding);
+}
+
+PAGX_TEST(PAGXUtilsTest, DetectMaskFillRule_EvenOddInContents) {
+  auto doc = pagx::PAGXDocument::Make(100, 100);
+  auto layer = doc->makeNode<pagx::Layer>();
+  auto fill = doc->makeNode<pagx::Fill>();
+  fill->fillRule = pagx::FillRule::EvenOdd;
+  layer->contents.push_back(fill);
+  EXPECT_EQ(pagx::DetectMaskFillRule(layer), pagx::FillRule::EvenOdd);
+}
+
+PAGX_TEST(PAGXUtilsTest, DetectMaskFillRule_WindingInContents) {
+  auto doc = pagx::PAGXDocument::Make(100, 100);
+  auto layer = doc->makeNode<pagx::Layer>();
+  auto fill = doc->makeNode<pagx::Fill>();
+  fill->fillRule = pagx::FillRule::Winding;
+  layer->contents.push_back(fill);
+  EXPECT_EQ(pagx::DetectMaskFillRule(layer), pagx::FillRule::Winding);
+}
+
+PAGX_TEST(PAGXUtilsTest, DetectMaskFillRule_EvenOddInChild) {
+  auto doc = pagx::PAGXDocument::Make(100, 100);
+  auto parent = doc->makeNode<pagx::Layer>();
+  auto child = doc->makeNode<pagx::Layer>();
+  auto fill = doc->makeNode<pagx::Fill>();
+  fill->fillRule = pagx::FillRule::EvenOdd;
+  child->contents.push_back(fill);
+  parent->children.push_back(child);
+  EXPECT_EQ(pagx::DetectMaskFillRule(parent), pagx::FillRule::EvenOdd);
+}
+
+PAGX_TEST(PAGXUtilsTest, DetectMaskFillRule_NestedChildEvenOdd) {
+  auto doc = pagx::PAGXDocument::Make(100, 100);
+  auto parent = doc->makeNode<pagx::Layer>();
+  auto child = doc->makeNode<pagx::Layer>();
+  auto grandchild = doc->makeNode<pagx::Layer>();
+  auto fill = doc->makeNode<pagx::Fill>();
+  fill->fillRule = pagx::FillRule::EvenOdd;
+  grandchild->contents.push_back(fill);
+  child->children.push_back(grandchild);
+  parent->children.push_back(child);
+  EXPECT_EQ(pagx::DetectMaskFillRule(parent), pagx::FillRule::EvenOdd);
+}
+
+// ---------------------------------------------------------------------------
+// GetImageData
+// ---------------------------------------------------------------------------
+
+PAGX_TEST(PAGXUtilsTest, GetImageData_NullImage) {
+  auto doc = pagx::PAGXDocument::Make(100, 100);
+  auto image = doc->makeNode<pagx::Image>();
+  auto data = pagx::GetImageData(image);
+  EXPECT_EQ(data, nullptr);
+}
+
+PAGX_TEST(PAGXUtilsTest, GetImageData_WithData) {
+  auto doc = pagx::PAGXDocument::Make(100, 100);
+  auto image = doc->makeNode<pagx::Image>();
+  uint8_t raw[] = {1, 2, 3, 4};
+  image->data = pagx::Data::MakeWithCopy(raw, sizeof(raw));
+  auto data = pagx::GetImageData(image);
+  ASSERT_NE(data, nullptr);
+  EXPECT_EQ(data->size(), 4u);
+}
+
+PAGX_TEST(PAGXUtilsTest, GetImageData_WithEmptyFilePath) {
+  auto doc = pagx::PAGXDocument::Make(100, 100);
+  auto image = doc->makeNode<pagx::Image>();
+  image->filePath = "";
+  auto data = pagx::GetImageData(image);
+  EXPECT_EQ(data, nullptr);
+}
+
+// ---------------------------------------------------------------------------
+// GetImagePNGDimensions
+// ---------------------------------------------------------------------------
+
+PAGX_TEST(PAGXUtilsTest, GetImagePNGDimensions_WithData) {
+  auto doc = pagx::PAGXDocument::Make(100, 100);
+  auto image = doc->makeNode<pagx::Image>();
+  uint8_t png[] = {0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A, 0x00, 0x00,
+                   0x00, 0x0D, 0x49, 0x48, 0x44, 0x52, 0x00, 0x00, 0x00, 0x10,  // width = 16
+                   0x00, 0x00, 0x00, 0x20};                                     // height = 32
+  image->data = pagx::Data::MakeWithCopy(png, sizeof(png));
+  int w = 0, h = 0;
+  EXPECT_TRUE(pagx::GetImagePNGDimensions(image, &w, &h));
+  EXPECT_EQ(w, 16);
+  EXPECT_EQ(h, 32);
+}
+
+PAGX_TEST(PAGXUtilsTest, GetImagePNGDimensions_NeitherDataNorFile) {
+  auto doc = pagx::PAGXDocument::Make(100, 100);
+  auto image = doc->makeNode<pagx::Image>();
+  int w = 0, h = 0;
+  EXPECT_FALSE(pagx::GetImagePNGDimensions(image, &w, &h));
+}
+
+PAGX_TEST(PAGXUtilsTest, GetImagePNGDimensions_InvalidData) {
+  auto doc = pagx::PAGXDocument::Make(100, 100);
+  auto image = doc->makeNode<pagx::Image>();
+  uint8_t raw[] = {0xFF, 0xD8, 0xFF, 0xE0};
+  image->data = pagx::Data::MakeWithCopy(raw, sizeof(raw));
+  int w = 0, h = 0;
+  EXPECT_FALSE(pagx::GetImagePNGDimensions(image, &w, &h));
+}
+
+// ---------------------------------------------------------------------------
+// GetImageDimensions
+// ---------------------------------------------------------------------------
+
+PAGX_TEST(PAGXUtilsTest, GetImageDimensions_PNG) {
+  auto doc = pagx::PAGXDocument::Make(100, 100);
+  auto image = doc->makeNode<pagx::Image>();
+  uint8_t png[] = {0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A, 0x00, 0x00,
+                   0x00, 0x0D, 0x49, 0x48, 0x44, 0x52, 0x00, 0x00, 0x00, 0x08,  // width = 8
+                   0x00, 0x00, 0x00, 0x04};                                     // height = 4
+  image->data = pagx::Data::MakeWithCopy(png, sizeof(png));
+  int w = 0, h = 0;
+  EXPECT_TRUE(pagx::GetImageDimensions(image, &w, &h));
+  EXPECT_EQ(w, 8);
+  EXPECT_EQ(h, 4);
+}
+
+PAGX_TEST(PAGXUtilsTest, GetImageDimensions_JPEG) {
+  auto doc = pagx::PAGXDocument::Make(100, 100);
+  auto image = doc->makeNode<pagx::Image>();
+  uint8_t jpeg[] = {
+      0xFF, 0xD8, 0xFF, 0xC0, 0x00, 0x11, 0x08, 0x00, 0x20, 0x00, 0x40,
+      0x03, 0x01, 0x11, 0x00, 0x02, 0x11, 0x01, 0x03, 0x11, 0x01,
+  };
+  image->data = pagx::Data::MakeWithCopy(jpeg, sizeof(jpeg));
+  int w = 0, h = 0;
+  EXPECT_TRUE(pagx::GetImageDimensions(image, &w, &h));
+  EXPECT_EQ(w, 64);
+  EXPECT_EQ(h, 32);
+}
+
+PAGX_TEST(PAGXUtilsTest, GetImageDimensions_NoData) {
+  auto doc = pagx::PAGXDocument::Make(100, 100);
+  auto image = doc->makeNode<pagx::Image>();
+  int w = 0, h = 0;
+  EXPECT_FALSE(pagx::GetImageDimensions(image, &w, &h));
+}
+
+// ---------------------------------------------------------------------------
+// ComputeGlyphPaths
+// ---------------------------------------------------------------------------
+
+PAGX_TEST(PAGXUtilsTest, ComputeGlyphPaths_EmptyText) {
+  auto doc = pagx::PAGXDocument::Make(100, 100);
+  auto text = doc->makeNode<pagx::Text>();
+  auto result = pagx::ComputeGlyphPaths(*text, 0, 0);
+  EXPECT_TRUE(result.empty());
+}
+
+PAGX_TEST(PAGXUtilsTest, ComputeGlyphPaths_EmptyGlyphRun) {
+  auto doc = pagx::PAGXDocument::Make(100, 100);
+  auto text = doc->makeNode<pagx::Text>();
+  auto font = doc->makeNode<pagx::Font>();
+  auto run = doc->makeNode<pagx::GlyphRun>();
+  run->font = font;
+  text->glyphRuns.push_back(run);
+  auto result = pagx::ComputeGlyphPaths(*text, 0, 0);
+  EXPECT_TRUE(result.empty());
+}
+
+PAGX_TEST(PAGXUtilsTest, ComputeGlyphPaths_NullFont) {
+  auto doc = pagx::PAGXDocument::Make(100, 100);
+  auto text = doc->makeNode<pagx::Text>();
+  auto run = doc->makeNode<pagx::GlyphRun>();
+  run->glyphs = {1};
+  text->glyphRuns.push_back(run);
+  auto result = pagx::ComputeGlyphPaths(*text, 0, 0);
+  EXPECT_TRUE(result.empty());
+}
+
+PAGX_TEST(PAGXUtilsTest, ComputeGlyphPaths_GlyphIDZero) {
+  auto doc = pagx::PAGXDocument::Make(100, 100);
+  auto text = doc->makeNode<pagx::Text>();
+  auto font = doc->makeNode<pagx::Font>();
+  auto glyph = doc->makeNode<pagx::Glyph>();
+  glyph->path = doc->makeNode<pagx::PathData>();
+  *glyph->path = pagx::PathDataFromSVGString("M0 0 L10 0 L10 10 Z");
+  glyph->advance = 10.0f;
+  font->glyphs.push_back(glyph);
+  auto run = doc->makeNode<pagx::GlyphRun>();
+  run->font = font;
+  run->fontSize = 1000.0f;
+  run->glyphs = {0};
+  text->glyphRuns.push_back(run);
+  auto result = pagx::ComputeGlyphPaths(*text, 0, 0);
+  EXPECT_TRUE(result.empty());
+}
+
+PAGX_TEST(PAGXUtilsTest, ComputeGlyphPaths_GlyphIDOutOfRange) {
+  auto doc = pagx::PAGXDocument::Make(100, 100);
+  auto text = doc->makeNode<pagx::Text>();
+  auto font = doc->makeNode<pagx::Font>();
+  auto glyph = doc->makeNode<pagx::Glyph>();
+  glyph->path = doc->makeNode<pagx::PathData>();
+  *glyph->path = pagx::PathDataFromSVGString("M0 0 L10 0 L10 10 Z");
+  glyph->advance = 10.0f;
+  font->glyphs.push_back(glyph);
+  auto run = doc->makeNode<pagx::GlyphRun>();
+  run->font = font;
+  run->fontSize = 1000.0f;
+  run->glyphs = {5};
+  text->glyphRuns.push_back(run);
+  auto result = pagx::ComputeGlyphPaths(*text, 0, 0);
+  EXPECT_TRUE(result.empty());
+}
+
+PAGX_TEST(PAGXUtilsTest, ComputeGlyphPaths_NullGlyphPath) {
+  auto doc = pagx::PAGXDocument::Make(100, 100);
+  auto text = doc->makeNode<pagx::Text>();
+  auto font = doc->makeNode<pagx::Font>();
+  auto glyph = doc->makeNode<pagx::Glyph>();
+  font->glyphs.push_back(glyph);
+  auto run = doc->makeNode<pagx::GlyphRun>();
+  run->font = font;
+  run->fontSize = 1000.0f;
+  run->glyphs = {1};
+  text->glyphRuns.push_back(run);
+  auto result = pagx::ComputeGlyphPaths(*text, 0, 0);
+  EXPECT_TRUE(result.empty());
+}
+
+PAGX_TEST(PAGXUtilsTest, ComputeGlyphPaths_EmptyGlyphPath) {
+  auto doc = pagx::PAGXDocument::Make(100, 100);
+  auto text = doc->makeNode<pagx::Text>();
+  auto font = doc->makeNode<pagx::Font>();
+  auto glyph = doc->makeNode<pagx::Glyph>();
+  glyph->path = doc->makeNode<pagx::PathData>();
+  glyph->advance = 10.0f;
+  font->glyphs.push_back(glyph);
+  auto run = doc->makeNode<pagx::GlyphRun>();
+  run->font = font;
+  run->fontSize = 1000.0f;
+  run->glyphs = {1};
+  text->glyphRuns.push_back(run);
+  auto result = pagx::ComputeGlyphPaths(*text, 0, 0);
+  EXPECT_TRUE(result.empty());
+}
+
+PAGX_TEST(PAGXUtilsTest, ComputeGlyphPaths_SingleGlyphWithPositions) {
+  auto doc = pagx::PAGXDocument::Make(100, 100);
+  auto text = doc->makeNode<pagx::Text>();
+  auto font = doc->makeNode<pagx::Font>();
+  font->unitsPerEm = 1000;
+  auto glyph = doc->makeNode<pagx::Glyph>();
+  glyph->path = doc->makeNode<pagx::PathData>();
+  *glyph->path = pagx::PathDataFromSVGString("M0 0 L500 0 L500 700 L0 700 Z");
+  glyph->advance = 500.0f;
+  font->glyphs.push_back(glyph);
+
+  auto run = doc->makeNode<pagx::GlyphRun>();
+  run->font = font;
+  run->fontSize = 20.0f;
+  run->glyphs = {1};
+  run->positions = {{10.0f, 5.0f}};
+  text->glyphRuns.push_back(run);
+
+  auto result = pagx::ComputeGlyphPaths(*text, 100.0f, 200.0f);
+  ASSERT_EQ(result.size(), 1u);
+  EXPECT_NE(result[0].pathData, nullptr);
+  EXPECT_FLOAT_EQ(result[0].transform.tx, 110.0f);
+  EXPECT_FLOAT_EQ(result[0].transform.ty, 205.0f);
+}
+
+PAGX_TEST(PAGXUtilsTest, ComputeGlyphPaths_WithXOffsets) {
+  auto doc = pagx::PAGXDocument::Make(100, 100);
+  auto text = doc->makeNode<pagx::Text>();
+  auto font = doc->makeNode<pagx::Font>();
+  font->unitsPerEm = 1000;
+  auto glyph = doc->makeNode<pagx::Glyph>();
+  glyph->path = doc->makeNode<pagx::PathData>();
+  *glyph->path = pagx::PathDataFromSVGString("M0 0 L500 0 L500 700 L0 700 Z");
+  glyph->advance = 500.0f;
+  font->glyphs.push_back(glyph);
+
+  auto run = doc->makeNode<pagx::GlyphRun>();
+  run->font = font;
+  run->fontSize = 10.0f;
+  run->glyphs = {1};
+  run->xOffsets = {15.0f};
+  text->glyphRuns.push_back(run);
+
+  auto result = pagx::ComputeGlyphPaths(*text, 0, 0);
+  ASSERT_EQ(result.size(), 1u);
+  EXPECT_FLOAT_EQ(result[0].transform.tx, 15.0f);
+}
+
+PAGX_TEST(PAGXUtilsTest, ComputeGlyphPaths_DefaultPositioning) {
+  auto doc = pagx::PAGXDocument::Make(100, 100);
+  auto text = doc->makeNode<pagx::Text>();
+  auto font = doc->makeNode<pagx::Font>();
+  font->unitsPerEm = 1000;
+  auto glyph1 = doc->makeNode<pagx::Glyph>();
+  glyph1->path = doc->makeNode<pagx::PathData>();
+  *glyph1->path = pagx::PathDataFromSVGString("M0 0 L500 0 L500 700 L0 700 Z");
+  glyph1->advance = 500.0f;
+  auto glyph2 = doc->makeNode<pagx::Glyph>();
+  glyph2->path = doc->makeNode<pagx::PathData>();
+  *glyph2->path = pagx::PathDataFromSVGString("M0 0 L400 0 L400 700 L0 700 Z");
+  glyph2->advance = 400.0f;
+  font->glyphs.push_back(glyph1);
+  font->glyphs.push_back(glyph2);
+
+  auto run = doc->makeNode<pagx::GlyphRun>();
+  run->font = font;
+  run->fontSize = 10.0f;
+  run->glyphs = {1, 2};
+  text->glyphRuns.push_back(run);
+
+  auto result = pagx::ComputeGlyphPaths(*text, 0, 0);
+  ASSERT_EQ(result.size(), 2u);
+  EXPECT_FLOAT_EQ(result[0].transform.tx, 0.0f);
+  float expectedSecondX = glyph1->advance * (10.0f / 1000.0f);
+  EXPECT_FLOAT_EQ(result[1].transform.tx, expectedSecondX);
+}
+
+PAGX_TEST(PAGXUtilsTest, ComputeGlyphPaths_WithRotation) {
+  auto doc = pagx::PAGXDocument::Make(100, 100);
+  auto text = doc->makeNode<pagx::Text>();
+  auto font = doc->makeNode<pagx::Font>();
+  font->unitsPerEm = 1000;
+  auto glyph = doc->makeNode<pagx::Glyph>();
+  glyph->path = doc->makeNode<pagx::PathData>();
+  *glyph->path = pagx::PathDataFromSVGString("M0 0 L500 0 L500 700 L0 700 Z");
+  glyph->advance = 500.0f;
+  font->glyphs.push_back(glyph);
+
+  auto run = doc->makeNode<pagx::GlyphRun>();
+  run->font = font;
+  run->fontSize = 20.0f;
+  run->glyphs = {1};
+  run->positions = {{0, 0}};
+  run->rotations = {45.0f};
+  text->glyphRuns.push_back(run);
+
+  auto result = pagx::ComputeGlyphPaths(*text, 0, 0);
+  ASSERT_EQ(result.size(), 1u);
+  EXPECT_FALSE(result[0].transform.isIdentity());
+}
+
+PAGX_TEST(PAGXUtilsTest, ComputeGlyphPaths_WithScale) {
+  auto doc = pagx::PAGXDocument::Make(100, 100);
+  auto text = doc->makeNode<pagx::Text>();
+  auto font = doc->makeNode<pagx::Font>();
+  font->unitsPerEm = 1000;
+  auto glyph = doc->makeNode<pagx::Glyph>();
+  glyph->path = doc->makeNode<pagx::PathData>();
+  *glyph->path = pagx::PathDataFromSVGString("M0 0 L500 0 L500 700 L0 700 Z");
+  glyph->advance = 500.0f;
+  font->glyphs.push_back(glyph);
+
+  auto run = doc->makeNode<pagx::GlyphRun>();
+  run->font = font;
+  run->fontSize = 20.0f;
+  run->glyphs = {1};
+  run->positions = {{0, 0}};
+  run->scales = {{2.0f, 2.0f}};
+  text->glyphRuns.push_back(run);
+
+  auto result = pagx::ComputeGlyphPaths(*text, 0, 0);
+  ASSERT_EQ(result.size(), 1u);
+  EXPECT_FALSE(result[0].transform.isIdentity());
+}
+
+PAGX_TEST(PAGXUtilsTest, ComputeGlyphPaths_WithSkew) {
+  auto doc = pagx::PAGXDocument::Make(100, 100);
+  auto text = doc->makeNode<pagx::Text>();
+  auto font = doc->makeNode<pagx::Font>();
+  font->unitsPerEm = 1000;
+  auto glyph = doc->makeNode<pagx::Glyph>();
+  glyph->path = doc->makeNode<pagx::PathData>();
+  *glyph->path = pagx::PathDataFromSVGString("M0 0 L500 0 L500 700 L0 700 Z");
+  glyph->advance = 500.0f;
+  font->glyphs.push_back(glyph);
+
+  auto run = doc->makeNode<pagx::GlyphRun>();
+  run->font = font;
+  run->fontSize = 20.0f;
+  run->glyphs = {1};
+  run->positions = {{0, 0}};
+  run->skews = {30.0f};
+  text->glyphRuns.push_back(run);
+
+  auto result = pagx::ComputeGlyphPaths(*text, 0, 0);
+  ASSERT_EQ(result.size(), 1u);
+  EXPECT_FALSE(result[0].transform.isIdentity());
+}
+
+PAGX_TEST(PAGXUtilsTest, ComputeGlyphPaths_WithAnchors) {
+  auto doc = pagx::PAGXDocument::Make(100, 100);
+  auto text = doc->makeNode<pagx::Text>();
+  auto font = doc->makeNode<pagx::Font>();
+  font->unitsPerEm = 1000;
+  auto glyph = doc->makeNode<pagx::Glyph>();
+  glyph->path = doc->makeNode<pagx::PathData>();
+  *glyph->path = pagx::PathDataFromSVGString("M0 0 L500 0 L500 700 L0 700 Z");
+  glyph->advance = 500.0f;
+  font->glyphs.push_back(glyph);
+
+  auto run = doc->makeNode<pagx::GlyphRun>();
+  run->font = font;
+  run->fontSize = 20.0f;
+  run->glyphs = {1};
+  run->positions = {{0, 0}};
+  run->rotations = {45.0f};
+  run->anchors = {{10.0f, 20.0f}};
+  text->glyphRuns.push_back(run);
+
+  auto result = pagx::ComputeGlyphPaths(*text, 0, 0);
+  ASSERT_EQ(result.size(), 1u);
+  EXPECT_FALSE(result[0].transform.isIdentity());
+}
+
+PAGX_TEST(PAGXUtilsTest, ComputeGlyphPaths_PositionWithXOffset) {
+  auto doc = pagx::PAGXDocument::Make(100, 100);
+  auto text = doc->makeNode<pagx::Text>();
+  auto font = doc->makeNode<pagx::Font>();
+  font->unitsPerEm = 1000;
+  auto glyph = doc->makeNode<pagx::Glyph>();
+  glyph->path = doc->makeNode<pagx::PathData>();
+  *glyph->path = pagx::PathDataFromSVGString("M0 0 L500 0 L500 700 L0 700 Z");
+  glyph->advance = 500.0f;
+  font->glyphs.push_back(glyph);
+
+  auto run = doc->makeNode<pagx::GlyphRun>();
+  run->font = font;
+  run->fontSize = 20.0f;
+  run->x = 10.0f;
+  run->y = 5.0f;
+  run->glyphs = {1};
+  run->positions = {{20.0f, 30.0f}};
+  run->xOffsets = {3.0f};
+  text->glyphRuns.push_back(run);
+
+  auto result = pagx::ComputeGlyphPaths(*text, 100.0f, 200.0f);
+  ASSERT_EQ(result.size(), 1u);
+  // posX = textPosX + run->x + positions[i].x + xOffsets[i] = 100 + 10 + 20 + 3 = 133
+  // posY = textPosY + run->y + positions[i].y = 200 + 5 + 30 = 235
+  EXPECT_FLOAT_EQ(result[0].transform.tx, 133.0f);
+  EXPECT_FLOAT_EQ(result[0].transform.ty, 235.0f);
+}
+
+// ---------------------------------------------------------------------------
+// GetPNGDimensionsFromPath (data URI variant)
+// ---------------------------------------------------------------------------
+
+PAGX_TEST(PAGXUtilsTest, GetPNGDimensionsFromPath_InvalidDataURI) {
+  int w = 0, h = 0;
+  EXPECT_FALSE(pagx::GetPNGDimensionsFromPath("data:invalid", &w, &h));
+}
+
+PAGX_TEST(PAGXUtilsTest, GetPNGDimensionsFromPath_NonexistentFile) {
+  int w = 0, h = 0;
+  EXPECT_FALSE(pagx::GetPNGDimensionsFromPath("/nonexistent/path.png", &w, &h));
+}
+
+// ---------------------------------------------------------------------------
+// GetImageDPI (null/empty image data)
+// ---------------------------------------------------------------------------
+
+PAGX_TEST(PAGXUtilsTest, GetImageDPI_NullData) {
+  auto doc = pagx::PAGXDocument::Make(100, 100);
+  auto image = doc->makeNode<pagx::Image>();
+  float dpiX = 0, dpiY = 0;
+  EXPECT_FALSE(pagx::GetImageDPI(image, &dpiX, &dpiY));
+}
+
+PAGX_TEST(PAGXUtilsTest, GetImageDPI_EmptyData) {
+  auto doc = pagx::PAGXDocument::Make(100, 100);
+  auto image = doc->makeNode<pagx::Image>();
+  image->data = pagx::Data::MakeWithCopy(nullptr, 0);
+  float dpiX = 0, dpiY = 0;
+  EXPECT_FALSE(pagx::GetImageDPI(image, &dpiX, &dpiY));
+}
+
+PAGX_TEST(PAGXUtilsTest, GetImageDPI_ValidPNG_WithpHYs) {
+  // Minimal PNG with pHYs chunk specifying 96 DPI (3780 pixels/meter)
+  // pixels_per_unit = 3780, unit = 1 (meter) → DPI = 3780 * 0.0254 ≈ 96.012
+  uint8_t png[] = {
+      0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A,  // PNG signature
+      // IHDR chunk
+      0x00, 0x00, 0x00, 0x0D,  // length = 13
+      0x49, 0x48, 0x44, 0x52,  // "IHDR"
+      0x00, 0x00, 0x00, 0x01,  // width = 1
+      0x00, 0x00, 0x00, 0x01,  // height = 1
+      0x08, 0x02,              // 8-bit RGB
+      0x00, 0x00, 0x00,        // compression, filter, interlace
+      0x00, 0x00, 0x00, 0x00,  // CRC (dummy)
+      // pHYs chunk
+      0x00, 0x00, 0x00, 0x09,  // length = 9
+      0x70, 0x48, 0x59, 0x73,  // "pHYs"
+      0x00, 0x00, 0x0E, 0xC4,  // X: 3780 pixels/meter
+      0x00, 0x00, 0x0E, 0xC4,  // Y: 3780 pixels/meter
+      0x01,                    // unit: meter
+      0x00, 0x00, 0x00, 0x00,  // CRC (dummy)
+  };
+  auto doc = pagx::PAGXDocument::Make(100, 100);
+  auto image = doc->makeNode<pagx::Image>();
+  image->data = pagx::Data::MakeWithCopy(png, sizeof(png));
+  float dpiX = 0, dpiY = 0;
+  EXPECT_TRUE(pagx::GetImageDPI(image, &dpiX, &dpiY));
+  EXPECT_NEAR(dpiX, 96.012f, 0.1f);
+  EXPECT_NEAR(dpiY, 96.012f, 0.1f);
+}
+
+PAGX_TEST(PAGXUtilsTest, GetImageDPI_PNG_NopHYs) {
+  // Minimal PNG without pHYs chunk → DPI not available
+  uint8_t png[] = {
+      0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A,  // PNG signature
+      // IHDR chunk
+      0x00, 0x00, 0x00, 0x0D,  // length = 13
+      0x49, 0x48, 0x44, 0x52,  // "IHDR"
+      0x00, 0x00, 0x00, 0x01,  // width = 1
+      0x00, 0x00, 0x00, 0x01,  // height = 1
+      0x08, 0x02,              // 8-bit RGB
+      0x00, 0x00, 0x00,        // compression, filter, interlace
+      0x00, 0x00, 0x00, 0x00,  // CRC (dummy)
+      // IDAT chunk (trigger early exit)
+      0x00, 0x00, 0x00, 0x00,  // length = 0
+      0x49, 0x44, 0x41, 0x54,  // "IDAT"
+      0x00, 0x00, 0x00, 0x00,  // CRC (dummy)
+  };
+  auto doc = pagx::PAGXDocument::Make(100, 100);
+  auto image = doc->makeNode<pagx::Image>();
+  image->data = pagx::Data::MakeWithCopy(png, sizeof(png));
+  float dpiX = 0, dpiY = 0;
+  EXPECT_FALSE(pagx::GetImageDPI(image, &dpiX, &dpiY));
+}
+
+PAGX_TEST(PAGXUtilsTest, GetImageDPI_PNG_pHYs_UnitNotMeter) {
+  // pHYs with unit = 0 (unknown) → DPI not available
+  uint8_t png[] = {
+      0x89,
+      0x50,
+      0x4E,
+      0x47,
+      0x0D,
+      0x0A,
+      0x1A,
+      0x0A,
+      0x00,
+      0x00,
+      0x00,
+      0x0D,
+      0x49,
+      0x48,
+      0x44,
+      0x52,
+      0x00,
+      0x00,
+      0x00,
+      0x01,
+      0x00,
+      0x00,
+      0x00,
+      0x01,
+      0x08,
+      0x02,
+      0x00,
+      0x00,
+      0x00,
+      0x00,
+      0x00,
+      0x00,
+      0x00,
+      // pHYs chunk
+      0x00,
+      0x00,
+      0x00,
+      0x09,
+      0x70,
+      0x48,
+      0x59,
+      0x73,
+      0x00,
+      0x00,
+      0x0E,
+      0xC4,  // X: 3780
+      0x00,
+      0x00,
+      0x0E,
+      0xC4,  // Y: 3780
+      0x00,  // unit: unknown (not meter)
+      0x00,
+      0x00,
+      0x00,
+      0x00,
+  };
+  auto doc = pagx::PAGXDocument::Make(100, 100);
+  auto image = doc->makeNode<pagx::Image>();
+  image->data = pagx::Data::MakeWithCopy(png, sizeof(png));
+  float dpiX = 0, dpiY = 0;
+  EXPECT_FALSE(pagx::GetImageDPI(image, &dpiX, &dpiY));
+}
+
+PAGX_TEST(PAGXUtilsTest, GetImageDPI_ValidJPEG_JFIF_DPI) {
+  // JPEG with JFIF APP0 marker, units=1 (DPI), xDensity=72, yDensity=72
+  uint8_t jpeg[] = {
+      0xFF, 0xD8,                    // SOI
+      0xFF, 0xE0,                    // APP0
+      0x00, 0x10,                    // segment length = 16
+      0x4A, 0x46, 0x49, 0x46, 0x00,  // "JFIF\0"
+      0x01, 0x01,                    // version 1.1
+      0x01,                          // units = 1 (DPI)
+      0x00, 0x48,                    // xDensity = 72
+      0x00, 0x48,                    // yDensity = 72
+      0x00, 0x00,                    // thumbnail dims
+  };
+  auto doc = pagx::PAGXDocument::Make(100, 100);
+  auto image = doc->makeNode<pagx::Image>();
+  image->data = pagx::Data::MakeWithCopy(jpeg, sizeof(jpeg));
+  float dpiX = 0, dpiY = 0;
+  EXPECT_TRUE(pagx::GetImageDPI(image, &dpiX, &dpiY));
+  EXPECT_FLOAT_EQ(dpiX, 72.0f);
+  EXPECT_FLOAT_EQ(dpiY, 72.0f);
+}
+
+PAGX_TEST(PAGXUtilsTest, GetImageDPI_ValidJPEG_JFIF_DotPerCm) {
+  // JPEG with JFIF APP0, units=2 (dots/cm), xDensity=28, yDensity=28 → 71.12 DPI
+  uint8_t jpeg[] = {
+      0xFF, 0xD8, 0xFF, 0xE0, 0x00, 0x10, 0x4A, 0x46, 0x49, 0x46, 0x00, 0x01, 0x01,
+      0x02,        // units = 2 (dots per cm)
+      0x00, 0x1C,  // xDensity = 28
+      0x00, 0x1C,  // yDensity = 28
+      0x00, 0x00,
+  };
+  auto doc = pagx::PAGXDocument::Make(100, 100);
+  auto image = doc->makeNode<pagx::Image>();
+  image->data = pagx::Data::MakeWithCopy(jpeg, sizeof(jpeg));
+  float dpiX = 0, dpiY = 0;
+  EXPECT_TRUE(pagx::GetImageDPI(image, &dpiX, &dpiY));
+  EXPECT_NEAR(dpiX, 71.12f, 0.01f);
+  EXPECT_NEAR(dpiY, 71.12f, 0.01f);
+}
+
+PAGX_TEST(PAGXUtilsTest, GetImageDPI_JPEG_NoJFIF) {
+  // JPEG without JFIF APP0 → no DPI
+  uint8_t jpeg[] = {
+      0xFF, 0xD8, 0xFF, 0xDA,  // SOS immediately
+      0x00, 0x04, 0x00, 0x00,
+  };
+  auto doc = pagx::PAGXDocument::Make(100, 100);
+  auto image = doc->makeNode<pagx::Image>();
+  image->data = pagx::Data::MakeWithCopy(jpeg, sizeof(jpeg));
+  float dpiX = 0, dpiY = 0;
+  EXPECT_FALSE(pagx::GetImageDPI(image, &dpiX, &dpiY));
+}
+
+PAGX_TEST(PAGXUtilsTest, GetImageDPI_JPEG_InvalidHeader) {
+  uint8_t data[] = {0x00, 0x00, 0x00};
+  auto doc = pagx::PAGXDocument::Make(100, 100);
+  auto image = doc->makeNode<pagx::Image>();
+  image->data = pagx::Data::MakeWithCopy(data, sizeof(data));
+  float dpiX = 0, dpiY = 0;
+  EXPECT_FALSE(pagx::GetImageDPI(image, &dpiX, &dpiY));
+}
+
+PAGX_TEST(PAGXUtilsTest, GetImageDPI_PNG_InvalidSignature) {
+  uint8_t data[] = {0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00};
+  auto doc = pagx::PAGXDocument::Make(100, 100);
+  auto image = doc->makeNode<pagx::Image>();
+  image->data = pagx::Data::MakeWithCopy(data, sizeof(data));
+  float dpiX = 0, dpiY = 0;
+  EXPECT_FALSE(pagx::GetImageDPI(image, &dpiX, &dpiY));
+}
+
+PAGX_TEST(PAGXUtilsTest, GetImageDPI_PNG_pHYs_WrongLength) {
+  // pHYs chunk with wrong length (not 9) → skip
+  uint8_t png[] = {
+      0x89,
+      0x50,
+      0x4E,
+      0x47,
+      0x0D,
+      0x0A,
+      0x1A,
+      0x0A,
+      0x00,
+      0x00,
+      0x00,
+      0x0D,
+      0x49,
+      0x48,
+      0x44,
+      0x52,
+      0x00,
+      0x00,
+      0x00,
+      0x01,
+      0x00,
+      0x00,
+      0x00,
+      0x01,
+      0x08,
+      0x02,
+      0x00,
+      0x00,
+      0x00,
+      0x00,
+      0x00,
+      0x00,
+      0x00,
+      // pHYs chunk with wrong length (5 instead of 9)
+      0x00,
+      0x00,
+      0x00,
+      0x05,
+      0x70,
+      0x48,
+      0x59,
+      0x73,
+      0x00,
+      0x00,
+      0x0E,
+      0xC4,  // partial data
+      0x00,
+      0x00,
+      0x00,
+      0x00,
+      0x00,
+  };
+  auto doc = pagx::PAGXDocument::Make(100, 100);
+  auto image = doc->makeNode<pagx::Image>();
+  image->data = pagx::Data::MakeWithCopy(png, sizeof(png));
+  float dpiX = 0, dpiY = 0;
+  EXPECT_FALSE(pagx::GetImageDPI(image, &dpiX, &dpiY));
+}
+
+PAGX_TEST(PAGXUtilsTest, GetImageDPI_JPEG_JFIF_UnitZero) {
+  // JPEG JFIF with units=0 (no DPI, just aspect ratio) → should return false
+  uint8_t jpeg[] = {
+      0xFF, 0xD8, 0xFF, 0xE0, 0x00, 0x10, 0x4A, 0x46, 0x49, 0x46, 0x00, 0x01, 0x01,
+      0x00,        // units = 0 (no unit, aspect ratio only)
+      0x00, 0x48,  // xDensity = 72
+      0x00, 0x48,  // yDensity = 72
+      0x00, 0x00,
+  };
+  auto doc = pagx::PAGXDocument::Make(100, 100);
+  auto image = doc->makeNode<pagx::Image>();
+  image->data = pagx::Data::MakeWithCopy(jpeg, sizeof(jpeg));
+  float dpiX = 0, dpiY = 0;
+  EXPECT_FALSE(pagx::GetImageDPI(image, &dpiX, &dpiY));
+}
+
+// ---------------------------------------------------------------------------
+// GetImageData with file path
+// ---------------------------------------------------------------------------
+
+PAGX_TEST(PAGXUtilsTest, GetImageData_WithNonexistentFilePath) {
+  auto doc = pagx::PAGXDocument::Make(100, 100);
+  auto image = doc->makeNode<pagx::Image>();
+  image->filePath = "/nonexistent/file/path.png";
+  auto data = pagx::GetImageData(image);
+  EXPECT_EQ(data, nullptr);
+}
+
+PAGX_TEST(PAGXUtilsTest, GetImageData_DataTakesPrecedenceOverFilePath) {
+  auto doc = pagx::PAGXDocument::Make(100, 100);
+  auto image = doc->makeNode<pagx::Image>();
+  uint8_t raw[] = {10, 20, 30};
+  image->data = pagx::Data::MakeWithCopy(raw, sizeof(raw));
+  image->filePath = "/some/file.png";
+  auto data = pagx::GetImageData(image);
+  ASSERT_NE(data, nullptr);
+  EXPECT_EQ(data->size(), 3u);
+}
+
+// ---------------------------------------------------------------------------
+// GetPNGDimensionsFromPath with actual file
+// ---------------------------------------------------------------------------
+
+PAGX_TEST(PAGXUtilsTest, GetPNGDimensionsFromPath_TruncatedFile) {
+  int w = 0, h = 0;
+  EXPECT_FALSE(pagx::GetPNGDimensionsFromPath("data:image/png;base64,AAAA", &w, &h));
+}
+
+// ---------------------------------------------------------------------------
+// GetImagePNGDimensions with file path
+// ---------------------------------------------------------------------------
+
+PAGX_TEST(PAGXUtilsTest, GetImagePNGDimensions_WithNonexistentPath) {
+  auto doc = pagx::PAGXDocument::Make(100, 100);
+  auto image = doc->makeNode<pagx::Image>();
+  image->filePath = "/nonexistent/path.png";
+  int w = 0, h = 0;
+  EXPECT_FALSE(pagx::GetImagePNGDimensions(image, &w, &h));
+}
+
+// ---------------------------------------------------------------------------
+// IsWebP
+// ---------------------------------------------------------------------------
+
+PAGX_TEST(PAGXUtilsTest, IsWebP_ValidRIFFWEBP) {
+  uint8_t data[] = {'R', 'I', 'F', 'F', 0x00, 0x00, 0x00, 0x00, 'W', 'E', 'B', 'P'};
+  EXPECT_TRUE(pagx::IsWebP(data, sizeof(data)));
+}
+
+PAGX_TEST(PAGXUtilsTest, IsWebP_TooSmall) {
+  uint8_t data[] = {'R', 'I', 'F', 'F'};
+  EXPECT_FALSE(pagx::IsWebP(data, sizeof(data)));
+}
+
+PAGX_TEST(PAGXUtilsTest, IsWebP_BadRIFF) {
+  uint8_t data[] = {'R', 'I', 'F', 'X', 0x00, 0x00, 0x00, 0x00, 'W', 'E', 'B', 'P'};
+  EXPECT_FALSE(pagx::IsWebP(data, sizeof(data)));
+}
+
+PAGX_TEST(PAGXUtilsTest, IsWebP_BadWEBPMagic) {
+  uint8_t data[] = {'R', 'I', 'F', 'F', 0x00, 0x00, 0x00, 0x00, 'W', 'A', 'V', 'E'};
+  EXPECT_FALSE(pagx::IsWebP(data, sizeof(data)));
+}
+
+// ---------------------------------------------------------------------------
+// GetWebPDimensions
+// ---------------------------------------------------------------------------
+
+PAGX_TEST(PAGXUtilsTest, GetWebPDimensions_TooSmall) {
+  uint8_t data[] = {'R', 'I', 'F', 'F'};
+  int w = 0, h = 0;
+  EXPECT_FALSE(pagx::GetWebPDimensions(data, sizeof(data), &w, &h));
+}
+
+PAGX_TEST(PAGXUtilsTest, GetWebPDimensions_NotRIFF) {
+  uint8_t data[20] = {};
+  int w = 0, h = 0;
+  EXPECT_FALSE(pagx::GetWebPDimensions(data, sizeof(data), &w, &h));
+}
+
+PAGX_TEST(PAGXUtilsTest, GetWebPDimensions_LossyVP8) {
+  // Minimal "lossy" WebP file: RIFF + size + WEBP + VP8\x20 chunk with the 10-byte VP8 frame
+  // header. Width = ((0xC8 | (0x00 << 8)) & 0x3FFF) + 0 = 200, Height = 100.
+  uint8_t data[] = {
+      'R',  'I',  'F',  'F', 0x1A, 0x00, 0x00, 0x00,                          // chunk size
+      'W',  'E',  'B',  'P', 'V',  'P',  '8',  ' ',  0x0E, 0x00, 0x00, 0x00,  // chunk size
+      0x00, 0x00, 0x00,                                                       // 3 bytes preamble
+      0x9D, 0x01, 0x2A,                                                       // start code
+      0xC8, 0x00,  // width = 200 (low 14 bits)
+      0x64, 0x00,  // height = 100
+      0x00, 0x00,  // padding
+  };
+  int w = 0, h = 0;
+  EXPECT_TRUE(pagx::GetWebPDimensions(data, sizeof(data), &w, &h));
+  EXPECT_EQ(w, 200);
+  EXPECT_EQ(h, 100);
+}
+
+PAGX_TEST(PAGXUtilsTest, GetWebPDimensions_LosslessVP8L) {
+  // Width = (bits & 0x3FFF) + 1, Height = ((bits >> 14) & 0x3FFF) + 1
+  // bits[0] = 0x63 (LSB byte of width-1), bits[1] = 0x00 → width = 0x63 + 1 = 100
+  // (bits >> 14) needs bits[2] low bits set: place 0x32 in upper word so we get height=51
+  // Let's encode width=100 (w-1=99=0x63), height=80 (h-1=79=0x4F)
+  // bits = w-1 | (h-1 << 14) = 0x63 | (0x4F << 14) = 0x13C063
+  uint8_t data[] = {
+      'R',  'I',  'F',  'F',  0x1A, 0x00, 0x00, 0x00,                          // chunk size
+      'W',  'E',  'B',  'P',  'V',  'P',  '8',  'L',  0x05, 0x00, 0x00, 0x00,  // chunk size
+      0x2F,                                                                    // signature
+      0x63, 0xC0, 0x13, 0x00,                                                  // bits little-endian
+  };
+  int w = 0, h = 0;
+  EXPECT_TRUE(pagx::GetWebPDimensions(data, sizeof(data), &w, &h));
+  EXPECT_EQ(w, 100);
+  EXPECT_EQ(h, 80);
+}
+
+PAGX_TEST(PAGXUtilsTest, GetWebPDimensions_ExtendedVP8X) {
+  // VP8X carries width-1 / height-1 stored as 24-bit little-endian values.
+  // width=512 → w-1 = 0x1FF, height=256 → h-1 = 0xFF
+  uint8_t data[] = {
+      'R',  'I',  'F',  'F',  0x1E, 0x00, 0x00, 0x00,                          // chunk size
+      'W',  'E',  'B',  'P',  'V',  'P',  '8',  'X',  0x0A, 0x00, 0x00, 0x00,  // chunk size
+      0x00, 0x00, 0x00, 0x00,  // 4 bytes flags + reserved
+      0xFF, 0x01, 0x00,        // width-1 = 0x0001FF = 511
+      0xFF, 0x00, 0x00,        // height-1 = 0x0000FF = 255
+  };
+  int w = 0, h = 0;
+  EXPECT_TRUE(pagx::GetWebPDimensions(data, sizeof(data), &w, &h));
+  EXPECT_EQ(w, 512);
+  EXPECT_EQ(h, 256);
+}
+
+PAGX_TEST(PAGXUtilsTest, GetWebPDimensions_UnsupportedChunk) {
+  // RIFF/WEBP container but with an unknown chunk magic — should fail gracefully.
+  uint8_t data[] = {
+      'R', 'I', 'F', 'F', 0x1A, 0x00, 0x00, 0x00,                          // chunk size
+      'W', 'E', 'B', 'P', 'F',  'O',  'O',  ' ',  0x10, 0x00, 0x00, 0x00,  // chunk size
+      0,   0,   0,   0,   0,    0,    0,    0,    0,    0,    0,    0,     // padding
+  };
+  int w = 0, h = 0;
+  EXPECT_FALSE(pagx::GetWebPDimensions(data, sizeof(data), &w, &h));
+}
+
+// ---------------------------------------------------------------------------
+// EffectiveTextBoxWidth / Height
+// ---------------------------------------------------------------------------
+
+PAGX_TEST(PAGXUtilsTest, EffectiveTextBoxWidth_Explicit) {
+  auto doc = pagx::PAGXDocument::Make(100, 100);
+  auto box = doc->makeNode<pagx::TextBox>();
+  box->width = 50.0f;
+  EXPECT_FLOAT_EQ(pagx::EffectiveTextBoxWidth(box), 50.0f);
+}
+
+PAGX_TEST(PAGXUtilsTest, EffectiveTextBoxHeight_Explicit) {
+  auto doc = pagx::PAGXDocument::Make(100, 100);
+  auto box = doc->makeNode<pagx::TextBox>();
+  box->height = 80.0f;
+  EXPECT_FLOAT_EQ(pagx::EffectiveTextBoxHeight(box), 80.0f);
+}
+
+PAGX_TEST(PAGXUtilsTest, EffectiveTextBoxWidth_NaNUnresolved) {
+  auto doc = pagx::PAGXDocument::Make(100, 100);
+  auto box = doc->makeNode<pagx::TextBox>();
+  // No explicit width, no resolved width => NaN.
+  EXPECT_TRUE(std::isnan(pagx::EffectiveTextBoxWidth(box)));
+}
+
+PAGX_TEST(PAGXUtilsTest, EffectiveTextBoxHeight_NaNUnresolved) {
+  auto doc = pagx::PAGXDocument::Make(100, 100);
+  auto box = doc->makeNode<pagx::TextBox>();
+  EXPECT_TRUE(std::isnan(pagx::EffectiveTextBoxHeight(box)));
+}
+
+// ---------------------------------------------------------------------------
+// MakeTextBoxParams / MakeStandaloneParams
+// ---------------------------------------------------------------------------
+
+PAGX_TEST(PAGXUtilsTest, MakeTextBoxParams_ExplicitDimensions) {
+  auto doc = pagx::PAGXDocument::Make(200, 200);
+  auto box = doc->makeNode<pagx::TextBox>();
+  box->width = 100.0f;
+  box->height = 50.0f;
+  box->textAlign = pagx::TextAlign::Center;
+  box->paragraphAlign = pagx::ParagraphAlign::Far;
+  box->lineHeight = 1.5f;
+  box->wordWrap = false;
+  auto params = pagx::MakeTextBoxParams(box);
+  EXPECT_FLOAT_EQ(params.boxWidth, 100.0f);
+  EXPECT_FLOAT_EQ(params.boxHeight, 50.0f);
+  EXPECT_EQ(params.textAlign, pagx::TextAlign::Center);
+  EXPECT_EQ(params.paragraphAlign, pagx::ParagraphAlign::Far);
+  EXPECT_FLOAT_EQ(params.lineHeight, 1.5f);
+  EXPECT_FALSE(params.wordWrap);
+}
+
+PAGX_TEST(PAGXUtilsTest, MakeTextBoxParams_WithPaddingShrinksInnerDimensions) {
+  auto doc = pagx::PAGXDocument::Make(200, 200);
+  auto box = doc->makeNode<pagx::TextBox>();
+  box->width = 100.0f;
+  box->height = 50.0f;
+  box->padding = pagx::Padding{10.0f, 20.0f, 5.0f, 15.0f};
+  auto params = pagx::MakeTextBoxParams(box);
+  EXPECT_FLOAT_EQ(params.boxWidth, 100.0f - 20.0f - 15.0f);
+  EXPECT_FLOAT_EQ(params.boxHeight, 50.0f - 10.0f - 5.0f);
+}
+
+PAGX_TEST(PAGXUtilsTest, MakeTextBoxParams_PaddingClampsAtZero) {
+  auto doc = pagx::PAGXDocument::Make(200, 200);
+  auto box = doc->makeNode<pagx::TextBox>();
+  box->width = 10.0f;
+  box->height = 10.0f;
+  box->padding = pagx::Padding{20.0f, 20.0f, 20.0f, 20.0f};
+  auto params = pagx::MakeTextBoxParams(box);
+  EXPECT_FLOAT_EQ(params.boxWidth, 0.0f);
+  EXPECT_FLOAT_EQ(params.boxHeight, 0.0f);
+}
+
+PAGX_TEST(PAGXUtilsTest, MakeStandaloneParams_AnchorMapping) {
+  auto doc = pagx::PAGXDocument::Make(200, 200);
+  auto text = doc->makeNode<pagx::Text>();
+  text->textAnchor = pagx::TextAnchor::End;
+  text->fontSize = 30.0f;
+  auto params = pagx::MakeStandaloneParams(text);
+  EXPECT_EQ(params.textAlign, pagx::TextAlign::End);
+  EXPECT_FLOAT_EQ(params.textScale, 1.0f);
+}
+
+PAGX_TEST(PAGXUtilsTest, MakeStandaloneParams_AnchorCenter) {
+  auto doc = pagx::PAGXDocument::Make(200, 200);
+  auto text = doc->makeNode<pagx::Text>();
+  text->textAnchor = pagx::TextAnchor::Center;
+  text->fontSize = 20.0f;
+  auto params = pagx::MakeStandaloneParams(text);
+  EXPECT_EQ(params.textAlign, pagx::TextAlign::Center);
+}
+
+PAGX_TEST(PAGXUtilsTest, MakeStandaloneParams_AnchorStart) {
+  auto doc = pagx::PAGXDocument::Make(200, 200);
+  auto text = doc->makeNode<pagx::Text>();
+  text->textAnchor = pagx::TextAnchor::Start;
+  text->fontSize = 25.0f;
+  auto params = pagx::MakeStandaloneParams(text);
+  EXPECT_EQ(params.textAlign, pagx::TextAlign::Start);
+}
+
+PAGX_TEST(PAGXUtilsTest, MakeStandaloneParams_ZeroFontSize) {
+  auto doc = pagx::PAGXDocument::Make(200, 200);
+  auto text = doc->makeNode<pagx::Text>();
+  text->fontSize = 0.0f;
+  auto params = pagx::MakeStandaloneParams(text);
+  EXPECT_FLOAT_EQ(params.textScale, 1.0f);
+}
+
+// ---------------------------------------------------------------------------
+// StrokeAlignInset / ApplyStrokeBoxInset
+// ---------------------------------------------------------------------------
+
+PAGX_TEST(PAGXUtilsTest, StrokeAlignInset_NullStroke) {
+  EXPECT_FLOAT_EQ(pagx::StrokeAlignInset(nullptr), 0.0f);
+}
+
+PAGX_TEST(PAGXUtilsTest, StrokeAlignInset_ZeroWidth) {
+  auto doc = pagx::PAGXDocument::Make(100, 100);
+  auto stroke = doc->makeNode<pagx::Stroke>();
+  stroke->width = 0.0f;
+  EXPECT_FLOAT_EQ(pagx::StrokeAlignInset(stroke), 0.0f);
+}
+
+PAGX_TEST(PAGXUtilsTest, StrokeAlignInset_Inside) {
+  auto doc = pagx::PAGXDocument::Make(100, 100);
+  auto stroke = doc->makeNode<pagx::Stroke>();
+  stroke->width = 8.0f;
+  stroke->align = pagx::StrokeAlign::Inside;
+  EXPECT_FLOAT_EQ(pagx::StrokeAlignInset(stroke), 4.0f);
+}
+
+PAGX_TEST(PAGXUtilsTest, StrokeAlignInset_Outside) {
+  auto doc = pagx::PAGXDocument::Make(100, 100);
+  auto stroke = doc->makeNode<pagx::Stroke>();
+  stroke->width = 6.0f;
+  stroke->align = pagx::StrokeAlign::Outside;
+  EXPECT_FLOAT_EQ(pagx::StrokeAlignInset(stroke), -3.0f);
+}
+
+PAGX_TEST(PAGXUtilsTest, StrokeAlignInset_Center) {
+  auto doc = pagx::PAGXDocument::Make(100, 100);
+  auto stroke = doc->makeNode<pagx::Stroke>();
+  stroke->width = 4.0f;
+  stroke->align = pagx::StrokeAlign::Center;
+  EXPECT_FLOAT_EQ(pagx::StrokeAlignInset(stroke), 0.0f);
+}
+
+PAGX_TEST(PAGXUtilsTest, ApplyStrokeBoxInset_NoOpForCenter) {
+  auto doc = pagx::PAGXDocument::Make(100, 100);
+  auto stroke = doc->makeNode<pagx::Stroke>();
+  stroke->width = 10.0f;
+  stroke->align = pagx::StrokeAlign::Center;
+  float x = 0, y = 0, w = 50, h = 30;
+  pagx::ApplyStrokeBoxInset(stroke, x, y, w, h);
+  EXPECT_FLOAT_EQ(x, 0);
+  EXPECT_FLOAT_EQ(y, 0);
+  EXPECT_FLOAT_EQ(w, 50);
+  EXPECT_FLOAT_EQ(h, 30);
+}
+
+PAGX_TEST(PAGXUtilsTest, ApplyStrokeBoxInset_Inside) {
+  auto doc = pagx::PAGXDocument::Make(100, 100);
+  auto stroke = doc->makeNode<pagx::Stroke>();
+  stroke->width = 8.0f;
+  stroke->align = pagx::StrokeAlign::Inside;
+  float x = 0, y = 0, w = 100, h = 60;
+  float roundness = 12.0f;
+  pagx::ApplyStrokeBoxInset(stroke, x, y, w, h, &roundness);
+  EXPECT_FLOAT_EQ(x, 4.0f);
+  EXPECT_FLOAT_EQ(y, 4.0f);
+  EXPECT_FLOAT_EQ(w, 92.0f);
+  EXPECT_FLOAT_EQ(h, 52.0f);
+  EXPECT_FLOAT_EQ(roundness, 8.0f);
+}
+
+PAGX_TEST(PAGXUtilsTest, ApplyStrokeBoxInset_Outside) {
+  auto doc = pagx::PAGXDocument::Make(100, 100);
+  auto stroke = doc->makeNode<pagx::Stroke>();
+  stroke->width = 6.0f;
+  stroke->align = pagx::StrokeAlign::Outside;
+  float x = 10, y = 10, w = 40, h = 40;
+  pagx::ApplyStrokeBoxInset(stroke, x, y, w, h);
+  EXPECT_FLOAT_EQ(x, 7.0f);
+  EXPECT_FLOAT_EQ(y, 7.0f);
+  EXPECT_FLOAT_EQ(w, 46.0f);
+  EXPECT_FLOAT_EQ(h, 46.0f);
+}
+
+PAGX_TEST(PAGXUtilsTest, ApplyStrokeBoxInset_ClampsToHalfBox) {
+  auto doc = pagx::PAGXDocument::Make(100, 100);
+  auto stroke = doc->makeNode<pagx::Stroke>();
+  stroke->width = 200.0f;  // way larger than the box
+  stroke->align = pagx::StrokeAlign::Inside;
+  float x = 0, y = 0, w = 20, h = 30;
+  float roundness = 5.0f;
+  pagx::ApplyStrokeBoxInset(stroke, x, y, w, h, &roundness);
+  // inset is clamped to min(w, h) / 2 = 10.
+  EXPECT_FLOAT_EQ(x, 10.0f);
+  EXPECT_FLOAT_EQ(y, 10.0f);
+  EXPECT_FLOAT_EQ(w, 0.0f);
+  EXPECT_FLOAT_EQ(h, 10.0f);
+  EXPECT_FLOAT_EQ(roundness, 0.0f);
+}
+
+// ---------------------------------------------------------------------------
+// FindModifierTextBox
+// ---------------------------------------------------------------------------
+
+PAGX_TEST(PAGXUtilsTest, FindModifierTextBox_EmptyList) {
+  std::vector<pagx::Element*> contents;
+  EXPECT_EQ(pagx::FindModifierTextBox(contents), nullptr);
+}
+
+PAGX_TEST(PAGXUtilsTest, FindModifierTextBox_ContainerSkipped) {
+  auto doc = pagx::PAGXDocument::Make(100, 100);
+  auto box = doc->makeNode<pagx::TextBox>();
+  auto child = doc->makeNode<pagx::Text>();
+  box->elements.push_back(child);
+  std::vector<pagx::Element*> contents = {box};
+  // Container TextBox (with elements) is not a modifier-only box; expect nullptr.
+  EXPECT_EQ(pagx::FindModifierTextBox(contents), nullptr);
+}
+
+PAGX_TEST(PAGXUtilsTest, FindModifierTextBox_ModifierOnly) {
+  auto doc = pagx::PAGXDocument::Make(100, 100);
+  auto modifier = doc->makeNode<pagx::TextBox>();
+  std::vector<pagx::Element*> contents = {modifier};
+  EXPECT_EQ(pagx::FindModifierTextBox(contents), modifier);
+}
+
+PAGX_TEST(PAGXUtilsTest, FindModifierTextBox_PrefersFirst) {
+  auto doc = pagx::PAGXDocument::Make(100, 100);
+  auto first = doc->makeNode<pagx::TextBox>();
+  auto second = doc->makeNode<pagx::TextBox>();
+  std::vector<pagx::Element*> contents = {first, second};
+  EXPECT_EQ(pagx::FindModifierTextBox(contents), first);
+}
+
+// ---------------------------------------------------------------------------
+// DetectTextLang
+// ---------------------------------------------------------------------------
+
+PAGX_TEST(PAGXUtilsTest, DetectTextLang_EmptyDefault) {
+  EXPECT_EQ(pagx::DetectTextLang(""), "en-US");
+}
+
+PAGX_TEST(PAGXUtilsTest, DetectTextLang_ASCII) {
+  EXPECT_EQ(pagx::DetectTextLang("hello world"), "en-US");
+}
+
+PAGX_TEST(PAGXUtilsTest, DetectTextLang_CJKHan) {
+  // 中文
+  EXPECT_EQ(pagx::DetectTextLang("\xe4\xb8\xad\xe6\x96\x87"), "zh-CN");
+}
+
+PAGX_TEST(PAGXUtilsTest, DetectTextLang_Hiragana) {
+  // あ (U+3042)
+  EXPECT_EQ(pagx::DetectTextLang("\xe3\x81\x82"), "zh-CN");
+}
+
+PAGX_TEST(PAGXUtilsTest, DetectTextLang_Hebrew) {
+  // א (U+05D0)
+  EXPECT_EQ(pagx::DetectTextLang("\xd7\x90"), "he-IL");
+}
+
+PAGX_TEST(PAGXUtilsTest, DetectTextLang_Arabic) {
+  // ا (U+0627)
+  EXPECT_EQ(pagx::DetectTextLang("\xd8\xa7"), "ar-SA");
+}
+
+PAGX_TEST(PAGXUtilsTest, DetectTextLang_HangulSyllables) {
+  // 가 (U+AC00)
+  EXPECT_EQ(pagx::DetectTextLang("\xea\xb0\x80"), "zh-CN");
+}
+
+// ---------------------------------------------------------------------------
+// HasRTLParagraphBase
+// ---------------------------------------------------------------------------
+
+PAGX_TEST(PAGXUtilsTest, HasRTLParagraphBase_Empty) {
+  EXPECT_FALSE(pagx::HasRTLParagraphBase(""));
+}
+
+PAGX_TEST(PAGXUtilsTest, HasRTLParagraphBase_LatinIsLTR) {
+  EXPECT_FALSE(pagx::HasRTLParagraphBase("Hello"));
+}
+
+PAGX_TEST(PAGXUtilsTest, HasRTLParagraphBase_Hebrew) {
+  EXPECT_TRUE(pagx::HasRTLParagraphBase("\xd7\x90"));
+}
+
+PAGX_TEST(PAGXUtilsTest, HasRTLParagraphBase_Arabic) {
+  EXPECT_TRUE(pagx::HasRTLParagraphBase("\xd8\xa7"));
+}
+
+PAGX_TEST(PAGXUtilsTest, HasRTLParagraphBase_DigitsAreNeutral) {
+  // Pure digits / punctuation have no strong directional character → defaults to LTR.
+  EXPECT_FALSE(pagx::HasRTLParagraphBase("123 - !"));
+}
+
+PAGX_TEST(PAGXUtilsTest, HasRTLParagraphBase_DigitsBeforeRTL) {
+  // Leading neutral digits, RTL letter wins.
+  EXPECT_TRUE(pagx::HasRTLParagraphBase("12 \xd7\x90"));
+}
+
+PAGX_TEST(PAGXUtilsTest, HasRTLParagraphBase_CyrillicIsLTR) {
+  // А (U+0410)
+  EXPECT_FALSE(pagx::HasRTLParagraphBase("\xd0\x90"));
+}
+
+// ---------------------------------------------------------------------------
+// IterateUTF8Codepoints (template helper) — covered via DetectTextLang already,
+// but verify it stops on visitor returning false and skips truncated bytes.
+// ---------------------------------------------------------------------------
+
+PAGX_TEST(PAGXUtilsTest, IterateUTF8Codepoints_VisitorEarlyExit) {
+  struct StopAtThird {
+    int count = 0;
+    bool operator()(uint32_t) {
+      ++count;
+      return count < 3;
+    }
+  } visitor;
+  pagx::IterateUTF8Codepoints("abcdef", visitor);
+  EXPECT_EQ(visitor.count, 3);
+}
+
+PAGX_TEST(PAGXUtilsTest, IterateUTF8Codepoints_TruncatedTrailingByteSkipped) {
+  struct CollectAll {
+    std::vector<uint32_t> seen;
+    bool operator()(uint32_t cp) {
+      seen.push_back(cp);
+      return true;
+    }
+  } visitor;
+  // "A" followed by the lead byte of a 2-byte sequence with no continuation.
+  std::string truncated = "A\xC3";
+  pagx::IterateUTF8Codepoints(truncated, visitor);
+  ASSERT_EQ(visitor.seen.size(), 1u);
+  EXPECT_EQ(visitor.seen[0], 0x41u);
+}
+
+// ---------------------------------------------------------------------------
+// BuildLayerMatrix — matrix3D path
+// ---------------------------------------------------------------------------
+
+PAGX_TEST(PAGXUtilsTest, BuildLayerMatrix_Matrix3DOverridesMatrix) {
+  auto doc = pagx::PAGXDocument::Make(100, 100);
+  auto layer = doc->makeNode<pagx::Layer>();
+  layer->matrix = pagx::Matrix::Scale(10.0f, 10.0f);
+  // 2x scale on x, 3x scale on y, +5/+7 translation. Column-major layout:
+  // values[0..3] = column 0, [4..7] = column 1, [12..15] = column 3.
+  layer->matrix3D.values[0] = 2.0f;
+  layer->matrix3D.values[5] = 3.0f;
+  layer->matrix3D.values[12] = 5.0f;
+  layer->matrix3D.values[13] = 7.0f;
+  auto m = pagx::BuildLayerMatrix(layer);
+  EXPECT_FLOAT_EQ(m.a, 2.0f);
+  EXPECT_FLOAT_EQ(m.d, 3.0f);
+  EXPECT_FLOAT_EQ(m.tx, 5.0f);
+  EXPECT_FLOAT_EQ(m.ty, 7.0f);
+}
+
+// ---------------------------------------------------------------------------
+// SVGFeatureProbe — element-level probe
+// ---------------------------------------------------------------------------
+
+PAGX_TEST(PAGXUtilsTest, SVGFeatureProbe_EmptyElements) {
+  std::vector<pagx::Element*> empty;
+  auto flags = pagx::ProbeElementsFeaturesForSVG(empty);
+  EXPECT_FALSE(flags.needsRasterization());
+  EXPECT_FALSE(flags.hasTextPath);
+  EXPECT_FALSE(flags.hasTextModifier);
+  EXPECT_FALSE(flags.hasConicGradient);
+  EXPECT_FALSE(flags.hasDiamondGradient);
+}
+
+PAGX_TEST(PAGXUtilsTest, SVGFeatureProbe_SkipsNullElement) {
+  std::vector<pagx::Element*> elements = {nullptr};
+  auto flags = pagx::ProbeElementsFeaturesForSVG(elements);
+  EXPECT_FALSE(flags.needsRasterization());
+}
+
+PAGX_TEST(PAGXUtilsTest, SVGFeatureProbe_TextPath) {
+  auto doc = pagx::PAGXDocument::Make(100, 100);
+  auto tp = doc->makeNode<pagx::TextPath>();
+  std::vector<pagx::Element*> elements = {tp};
+  auto flags = pagx::ProbeElementsFeaturesForSVG(elements);
+  EXPECT_TRUE(flags.hasTextPath);
+  EXPECT_TRUE(flags.needsRasterization());
+}
+
+PAGX_TEST(PAGXUtilsTest, SVGFeatureProbe_TextModifier) {
+  auto doc = pagx::PAGXDocument::Make(100, 100);
+  auto tm = doc->makeNode<pagx::TextModifier>();
+  std::vector<pagx::Element*> elements = {tm};
+  auto flags = pagx::ProbeElementsFeaturesForSVG(elements);
+  EXPECT_TRUE(flags.hasTextModifier);
+}
+
+PAGX_TEST(PAGXUtilsTest, SVGFeatureProbe_ConicGradientInFill) {
+  auto doc = pagx::PAGXDocument::Make(100, 100);
+  auto fill = doc->makeNode<pagx::Fill>();
+  auto grad = doc->makeNode<pagx::ConicGradient>();
+  fill->color = grad;
+  std::vector<pagx::Element*> elements = {fill};
+  auto flags = pagx::ProbeElementsFeaturesForSVG(elements);
+  EXPECT_TRUE(flags.hasConicGradient);
+}
+
+PAGX_TEST(PAGXUtilsTest, SVGFeatureProbe_DiamondGradientInStroke) {
+  auto doc = pagx::PAGXDocument::Make(100, 100);
+  auto stroke = doc->makeNode<pagx::Stroke>();
+  auto grad = doc->makeNode<pagx::DiamondGradient>();
+  stroke->color = grad;
+  std::vector<pagx::Element*> elements = {stroke};
+  auto flags = pagx::ProbeElementsFeaturesForSVG(elements);
+  EXPECT_TRUE(flags.hasDiamondGradient);
+}
+
+PAGX_TEST(PAGXUtilsTest, SVGFeatureProbe_FillWithSolidColor) {
+  auto doc = pagx::PAGXDocument::Make(100, 100);
+  auto fill = doc->makeNode<pagx::Fill>();
+  auto solid = doc->makeNode<pagx::SolidColor>();
+  fill->color = solid;
+  std::vector<pagx::Element*> elements = {fill};
+  auto flags = pagx::ProbeElementsFeaturesForSVG(elements);
+  EXPECT_FALSE(flags.hasConicGradient);
+  EXPECT_FALSE(flags.hasDiamondGradient);
+  EXPECT_FALSE(flags.needsRasterization());
+}
+
+PAGX_TEST(PAGXUtilsTest, SVGFeatureProbe_FillWithNullColor) {
+  auto doc = pagx::PAGXDocument::Make(100, 100);
+  auto fill = doc->makeNode<pagx::Fill>();
+  std::vector<pagx::Element*> elements = {fill};
+  auto flags = pagx::ProbeElementsFeaturesForSVG(elements);
+  EXPECT_FALSE(flags.needsRasterization());
+}
+
+PAGX_TEST(PAGXUtilsTest, SVGFeatureProbe_NestedGroup) {
+  auto doc = pagx::PAGXDocument::Make(100, 100);
+  auto outer = doc->makeNode<pagx::Group>();
+  auto inner = doc->makeNode<pagx::Group>();
+  auto tp = doc->makeNode<pagx::TextPath>();
+  inner->elements.push_back(tp);
+  outer->elements.push_back(inner);
+  std::vector<pagx::Element*> elements = {outer};
+  auto flags = pagx::ProbeElementsFeaturesForSVG(elements);
+  EXPECT_TRUE(flags.hasTextPath);
+}
+
+PAGX_TEST(PAGXUtilsTest, SVGFeatureProbe_TextBoxRecurses) {
+  auto doc = pagx::PAGXDocument::Make(100, 100);
+  auto box = doc->makeNode<pagx::TextBox>();
+  auto tm = doc->makeNode<pagx::TextModifier>();
+  box->elements.push_back(tm);
+  std::vector<pagx::Element*> elements = {box};
+  auto flags = pagx::ProbeElementsFeaturesForSVG(elements);
+  EXPECT_TRUE(flags.hasTextModifier);
+}
+
+// ---------------------------------------------------------------------------
+// SVGFeatureProbe — layer-level probe
+// ---------------------------------------------------------------------------
+
+PAGX_TEST(PAGXUtilsTest, SVGFeatureProbe_NullLayer) {
+  auto flags = pagx::ProbeLayerFeaturesForSVG(nullptr);
+  EXPECT_FALSE(flags.needsRasterization());
+}
+
+PAGX_TEST(PAGXUtilsTest, SVGFeatureProbe_InvisibleLayer) {
+  auto doc = pagx::PAGXDocument::Make(100, 100);
+  auto layer = doc->makeNode<pagx::Layer>();
+  layer->visible = false;
+  auto tp = doc->makeNode<pagx::TextPath>();
+  layer->contents.push_back(tp);
+  auto flags = pagx::ProbeLayerFeaturesForSVG(layer);
+  EXPECT_FALSE(flags.needsRasterization());
+}
+
+PAGX_TEST(PAGXUtilsTest, SVGFeatureProbe_VisibleLayerWithFeature) {
+  auto doc = pagx::PAGXDocument::Make(100, 100);
+  auto layer = doc->makeNode<pagx::Layer>();
+  auto fill = doc->makeNode<pagx::Fill>();
+  auto grad = doc->makeNode<pagx::ConicGradient>();
+  fill->color = grad;
+  layer->contents.push_back(fill);
+  auto flags = pagx::ProbeLayerFeaturesForSVG(layer);
+  EXPECT_TRUE(flags.hasConicGradient);
+  EXPECT_TRUE(flags.needsRasterization());
+}
+
+PAGX_TEST(PAGXUtilsTest, SVGFeatureProbe_StrokeWithSolidColor) {
+  auto doc = pagx::PAGXDocument::Make(100, 100);
+  auto stroke = doc->makeNode<pagx::Stroke>();
+  auto solid = doc->makeNode<pagx::SolidColor>();
+  stroke->color = solid;
+  std::vector<pagx::Element*> elements = {stroke};
+  auto flags = pagx::ProbeElementsFeaturesForSVG(elements);
+  EXPECT_FALSE(flags.needsRasterization());
+}
+
+PAGX_TEST(PAGXUtilsTest, SVGFeatureProbe_GroupConicGradient) {
+  auto doc = pagx::PAGXDocument::Make(100, 100);
+  auto group = doc->makeNode<pagx::Group>();
+  auto fill = doc->makeNode<pagx::Fill>();
+  auto grad = doc->makeNode<pagx::ConicGradient>();
+  fill->color = grad;
+  group->elements.push_back(fill);
+  std::vector<pagx::Element*> elements = {group};
+  auto flags = pagx::ProbeElementsFeaturesForSVG(elements);
+  EXPECT_TRUE(flags.hasConicGradient);
+}
+
+PAGX_TEST(PAGXUtilsTest, SVGFeatureProbe_TextBoxWithDiamondGradient) {
+  auto doc = pagx::PAGXDocument::Make(100, 100);
+  auto box = doc->makeNode<pagx::TextBox>();
+  auto stroke = doc->makeNode<pagx::Stroke>();
+  auto grad = doc->makeNode<pagx::DiamondGradient>();
+  stroke->color = grad;
+  box->elements.push_back(stroke);
+  std::vector<pagx::Element*> elements = {box};
+  auto flags = pagx::ProbeElementsFeaturesForSVG(elements);
+  EXPECT_TRUE(flags.hasDiamondGradient);
+}
+
+PAGX_TEST(PAGXUtilsTest, SVGFeatureProbe_VisibleLayerWithoutFeatures) {
+  auto doc = pagx::PAGXDocument::Make(100, 100);
+  auto layer = doc->makeNode<pagx::Layer>();
+  auto fill = doc->makeNode<pagx::Fill>();
+  auto solid = doc->makeNode<pagx::SolidColor>();
+  fill->color = solid;
+  layer->contents.push_back(fill);
+  auto flags = pagx::ProbeLayerFeaturesForSVG(layer);
+  EXPECT_FALSE(flags.needsRasterization());
+}
+
+// ---------------------------------------------------------------------------
+// SVGPathParser — PathDataFromSVGString
+// ---------------------------------------------------------------------------
+
+PAGX_TEST(PAGXUtilsTest, SVGPathParser_EmptyString) {
+  auto path = pagx::PathDataFromSVGString("");
+  EXPECT_TRUE(path.isEmpty());
+}
+
+PAGX_TEST(PAGXUtilsTest, SVGPathParser_MoveLineClose) {
+  auto path = pagx::PathDataFromSVGString("M10 20 L30 40 Z");
+  ASSERT_EQ(path.verbs().size(), 3u);
+  EXPECT_EQ(path.verbs()[0], pagx::PathVerb::Move);
+  EXPECT_EQ(path.verbs()[1], pagx::PathVerb::Line);
+  EXPECT_EQ(path.verbs()[2], pagx::PathVerb::Close);
+  EXPECT_FLOAT_EQ(path.points()[0].x, 10.0f);
+  EXPECT_FLOAT_EQ(path.points()[0].y, 20.0f);
+  EXPECT_FLOAT_EQ(path.points()[1].x, 30.0f);
+  EXPECT_FLOAT_EQ(path.points()[1].y, 40.0f);
+}
+
+PAGX_TEST(PAGXUtilsTest, SVGPathParser_RelativeMoveAndLine) {
+  // Lower-case commands are relative to the current point.
+  auto path = pagx::PathDataFromSVGString("m5 5 l10 10");
+  ASSERT_EQ(path.verbs().size(), 2u);
+  EXPECT_EQ(path.verbs()[0], pagx::PathVerb::Move);
+  EXPECT_EQ(path.verbs()[1], pagx::PathVerb::Line);
+  EXPECT_FLOAT_EQ(path.points()[0].x, 5.0f);
+  EXPECT_FLOAT_EQ(path.points()[0].y, 5.0f);
+  EXPECT_FLOAT_EQ(path.points()[1].x, 15.0f);
+  EXPECT_FLOAT_EQ(path.points()[1].y, 15.0f);
+}
+
+PAGX_TEST(PAGXUtilsTest, SVGPathParser_HorizontalAndVerticalLines) {
+  // H and V commands and their relative variants.
+  auto path = pagx::PathDataFromSVGString("M0 0 H50 V20 h-10 v-5");
+  ASSERT_EQ(path.verbs().size(), 5u);
+  EXPECT_EQ(path.verbs()[1], pagx::PathVerb::Line);
+  EXPECT_FLOAT_EQ(path.points()[1].x, 50.0f);
+  EXPECT_FLOAT_EQ(path.points()[1].y, 0.0f);
+  EXPECT_FLOAT_EQ(path.points()[2].x, 50.0f);
+  EXPECT_FLOAT_EQ(path.points()[2].y, 20.0f);
+  EXPECT_FLOAT_EQ(path.points()[3].x, 40.0f);
+  EXPECT_FLOAT_EQ(path.points()[3].y, 20.0f);
+  EXPECT_FLOAT_EQ(path.points()[4].x, 40.0f);
+  EXPECT_FLOAT_EQ(path.points()[4].y, 15.0f);
+}
+
+PAGX_TEST(PAGXUtilsTest, SVGPathParser_QuadAndCubicCurves) {
+  auto path = pagx::PathDataFromSVGString("M0 0 Q10 20 30 40 C50 60 70 80 90 100");
+  ASSERT_EQ(path.verbs().size(), 3u);
+  EXPECT_EQ(path.verbs()[1], pagx::PathVerb::Quad);
+  EXPECT_EQ(path.verbs()[2], pagx::PathVerb::Cubic);
+}
+
+PAGX_TEST(PAGXUtilsTest, SVGPathParser_SmoothCubic) {
+  // S after C uses the reflected control point. The reflected x/y of the
+  // previous C ends at (40,40) reflected from control (10,30) -> (70,50).
+  auto path = pagx::PathDataFromSVGString("M0 0 C10 10 20 30 40 40 S60 60 80 80");
+  ASSERT_EQ(path.verbs().size(), 3u);
+  EXPECT_EQ(path.verbs()[2], pagx::PathVerb::Cubic);
+}
+
+PAGX_TEST(PAGXUtilsTest, SVGPathParser_SmoothQuad) {
+  auto path = pagx::PathDataFromSVGString("M0 0 Q10 20 30 40 T60 80");
+  ASSERT_EQ(path.verbs().size(), 3u);
+  EXPECT_EQ(path.verbs()[2], pagx::PathVerb::Quad);
+}
+
+PAGX_TEST(PAGXUtilsTest, SVGPathParser_SmoothCubicWithoutPriorCubic) {
+  // S / T without a prior C / Q reuse the current point as control1.
+  auto path = pagx::PathDataFromSVGString("M0 0 S10 10 20 20");
+  ASSERT_EQ(path.verbs().size(), 2u);
+  EXPECT_EQ(path.verbs()[1], pagx::PathVerb::Cubic);
+}
+
+PAGX_TEST(PAGXUtilsTest, SVGPathParser_SmoothQuadWithoutPriorQuad) {
+  auto path = pagx::PathDataFromSVGString("M0 0 T10 10");
+  ASSERT_EQ(path.verbs().size(), 2u);
+  EXPECT_EQ(path.verbs()[1], pagx::PathVerb::Quad);
+}
+
+PAGX_TEST(PAGXUtilsTest, SVGPathParser_ImplicitContinuationAfterMove) {
+  // Pairs after M continue as implicit L (uppercase) / l (lowercase).
+  auto path = pagx::PathDataFromSVGString("M0 0 10 10 20 20");
+  ASSERT_EQ(path.verbs().size(), 3u);
+  EXPECT_EQ(path.verbs()[1], pagx::PathVerb::Line);
+  EXPECT_EQ(path.verbs()[2], pagx::PathVerb::Line);
+  EXPECT_FLOAT_EQ(path.points()[1].x, 10.0f);
+  EXPECT_FLOAT_EQ(path.points()[1].y, 10.0f);
+  EXPECT_FLOAT_EQ(path.points()[2].x, 20.0f);
+  EXPECT_FLOAT_EQ(path.points()[2].y, 20.0f);
+}
+
+PAGX_TEST(PAGXUtilsTest, SVGPathParser_ArcQuarterCircle) {
+  // Arc command should generate cubic segments.
+  auto path = pagx::PathDataFromSVGString("M0 0 A10 10 0 0 1 10 10");
+  EXPECT_GT(path.verbs().size(), 1u);
+  EXPECT_EQ(path.verbs()[0], pagx::PathVerb::Move);
+  bool sawCubic = false;
+  for (auto v : path.verbs()) {
+    if (v == pagx::PathVerb::Cubic) {
+      sawCubic = true;
+      break;
+    }
+  }
+  EXPECT_TRUE(sawCubic);
+}
+
+PAGX_TEST(PAGXUtilsTest, SVGPathParser_ArcZeroRadiusFallsBackToLine) {
+  // rx == 0 falls back to a straight line.
+  auto path = pagx::PathDataFromSVGString("M0 0 A0 0 0 0 0 50 0");
+  ASSERT_EQ(path.verbs().size(), 2u);
+  EXPECT_EQ(path.verbs()[1], pagx::PathVerb::Line);
+  EXPECT_FLOAT_EQ(path.points()[1].x, 50.0f);
+}
+
+PAGX_TEST(PAGXUtilsTest, SVGPathParser_ArcLargeArcFullCircle) {
+  // Endpoints coincide → near-full sweep; large-arc forces a full sweep.
+  auto path = pagx::PathDataFromSVGString("M50 0 A50 50 0 1 1 49.99 0");
+  EXPECT_GT(path.verbs().size(), 1u);
+}
+
+PAGX_TEST(PAGXUtilsTest, SVGPathParser_NumberWithExponentAndSign) {
+  auto path = pagx::PathDataFromSVGString("M+1.5e1 -2.5e1");
+  ASSERT_EQ(path.verbs().size(), 1u);
+  EXPECT_FLOAT_EQ(path.points()[0].x, 15.0f);
+  EXPECT_FLOAT_EQ(path.points()[0].y, -25.0f);
+}
+
+PAGX_TEST(PAGXUtilsTest, SVGPathParser_LeadingDot) {
+  // ".5" should parse as 0.5.
+  auto path = pagx::PathDataFromSVGString("M.5 .25");
+  ASSERT_EQ(path.verbs().size(), 1u);
+  EXPECT_FLOAT_EQ(path.points()[0].x, 0.5f);
+  EXPECT_FLOAT_EQ(path.points()[0].y, 0.25f);
+}
+
+PAGX_TEST(PAGXUtilsTest, SVGPathParser_CommasAsSeparators) {
+  auto path = pagx::PathDataFromSVGString("M10,20,30,40");
+  ASSERT_EQ(path.verbs().size(), 2u);
+  EXPECT_EQ(path.verbs()[1], pagx::PathVerb::Line);
+}
+
+PAGX_TEST(PAGXUtilsTest, SVGPathParser_InvalidNumberRecovers) {
+  // Garbage between commands triggers the recovery path that skips to the
+  // next letter without erroring.
+  auto path = pagx::PathDataFromSVGString("M0 0 garbage L10 10");
+  // Recovery must keep both commands intact: the Move at (0,0) and the LineTo at (10,10). Without
+  // the count + endpoint assertions, a regression that drops the L command (or that consumes the
+  // garbage as a malformed coordinate and corrupts the next number) would silently still satisfy
+  // the original "verbs >= 2 and first is Move" check.
+  ASSERT_EQ(path.verbs().size(), 2u);
+  EXPECT_EQ(path.verbs()[0], pagx::PathVerb::Move);
+  EXPECT_EQ(path.verbs()[1], pagx::PathVerb::Line);
+  ASSERT_GE(path.points().size(), 2u);
+  EXPECT_FLOAT_EQ(path.points()[0].x, 0.0f);
+  EXPECT_FLOAT_EQ(path.points()[0].y, 0.0f);
+  EXPECT_FLOAT_EQ(path.points()[1].x, 10.0f);
+  EXPECT_FLOAT_EQ(path.points()[1].y, 10.0f);
+}
+
+PAGX_TEST(PAGXUtilsTest, SVGPathParser_UnknownCommandSkipped) {
+  // Unknown letter triggers the default branch and the parser advances past it.
+  auto path = pagx::PathDataFromSVGString("X M5 5 L20 30");
+  // The recovery skips X and then consumes both M and L. Asserting the second endpoint guards
+  // against a regression that re-eats the unknown command's bytes and corrupts the L payload.
+  ASSERT_EQ(path.verbs().size(), 2u);
+  EXPECT_EQ(path.verbs()[0], pagx::PathVerb::Move);
+  EXPECT_EQ(path.verbs()[1], pagx::PathVerb::Line);
+  ASSERT_GE(path.points().size(), 2u);
+  EXPECT_FLOAT_EQ(path.points()[0].x, 5.0f);
+  EXPECT_FLOAT_EQ(path.points()[0].y, 5.0f);
+  EXPECT_FLOAT_EQ(path.points()[1].x, 20.0f);
+  EXPECT_FLOAT_EQ(path.points()[1].y, 30.0f);
+}
+
+PAGX_TEST(PAGXUtilsTest, SVGPathParser_ZAfterLineKeepsCurrent) {
+  // After Z, the current point should reset to the start of the contour.
+  auto path = pagx::PathDataFromSVGString("M10 10 L20 20 Z L30 30");
+  ASSERT_EQ(path.verbs().size(), 4u);
+  EXPECT_EQ(path.verbs()[2], pagx::PathVerb::Close);
+  EXPECT_EQ(path.verbs()[3], pagx::PathVerb::Line);
+}
+
+// ---------------------------------------------------------------------------
+// SVGPathParser — PathDataToSVGString
+// ---------------------------------------------------------------------------
+
+PAGX_TEST(PAGXUtilsTest, SVGPathParser_ToSVGStringEmpty) {
+  pagx::PathData empty;
+  EXPECT_EQ(pagx::PathDataToSVGString(empty), "");
+}
+
+PAGX_TEST(PAGXUtilsTest, SVGPathParser_ToSVGStringAllVerbs) {
+  // Round-trip through the parser to construct a PathData with every verb,
+  // then ensure each command letter appears in the serialized output.
+  auto path = pagx::PathDataFromSVGString("M0 0 L10 0 Q15 5 20 0 C25 -5 30 -5 35 0 Z");
+  auto out = pagx::PathDataToSVGString(path);
+  EXPECT_NE(out.find("M"), std::string::npos);
+  EXPECT_NE(out.find("L"), std::string::npos);
+  EXPECT_NE(out.find("Q"), std::string::npos);
+  EXPECT_NE(out.find("C"), std::string::npos);
+  EXPECT_NE(out.find("Z"), std::string::npos);
+}
+
+PAGX_TEST(PAGXUtilsTest, SVGPathParser_ToSVGStringRoundTripPreservesGeometry) {
+  auto original = pagx::PathDataFromSVGString("M5 10 L20 30 L40 60 Z");
+  auto serialized = pagx::PathDataToSVGString(original);
+  auto restored = pagx::PathDataFromSVGString(serialized);
+  ASSERT_EQ(original.verbs().size(), restored.verbs().size());
+  ASSERT_EQ(original.points().size(), restored.points().size());
+  for (size_t i = 0; i < original.points().size(); ++i) {
+    EXPECT_FLOAT_EQ(original.points()[i].x, restored.points()[i].x);
+    EXPECT_FLOAT_EQ(original.points()[i].y, restored.points()[i].y);
+  }
+}
+
+}  // namespace pag

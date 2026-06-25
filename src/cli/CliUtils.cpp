@@ -17,7 +17,6 @@
 /////////////////////////////////////////////////////////////////////////////////////////////////
 
 #include "cli/CliUtils.h"
-#include <cmath>
 #include <fstream>
 #include <iostream>
 #include "pagx/PAGXImporter.h"
@@ -45,20 +44,38 @@ bool LoadFontConfig(FontConfig* fontConfig, const std::vector<std::string>& font
       std::cerr << command << ": failed to load font '" << fontFile << "'\n";
       return false;
     }
-    fontConfig->registerTypeface(typeface);
+    fontConfig->registerFont(fontFile, 0, typeface->fontFamily(), typeface->fontStyle());
   }
-  std::vector<std::shared_ptr<tgfx::Typeface>> fallbackTypefaces = {};
   for (const auto& fallbackStr : fallbacks) {
-    auto typeface = ResolveFallbackTypeface(fallbackStr);
-    if (typeface == nullptr) {
-      std::cerr << command << ": fallback font '" << fallbackStr << "' not found\n";
-      return false;
+    bool isFilePath = fallbackStr.find('/') != std::string::npos;
+    if (!isFilePath) {
+      auto dot = fallbackStr.rfind('.');
+      if (dot != std::string::npos) {
+        auto ext = fallbackStr.substr(dot);
+        isFilePath = ext == ".ttf" || ext == ".otf" || ext == ".ttc" || ext == ".woff" ||
+                     ext == ".woff2" || ext == ".TTF" || ext == ".OTF" || ext == ".TTC";
+      }
     }
-    fontConfig->registerTypeface(typeface);
-    fallbackTypefaces.push_back(typeface);
-  }
-  if (!fallbackTypefaces.empty()) {
-    fontConfig->addFallbackTypefaces(std::move(fallbackTypefaces));
+    if (isFilePath) {
+      // Register as both a main font (precise family match) and a fallback font, matching the
+      // pre-refactor behavior where fallback fonts were also reachable via exact family lookup.
+      auto typeface = tgfx::Typeface::MakeFromPath(fallbackStr);
+      if (typeface == nullptr) {
+        std::cerr << command << ": fallback font '" << fallbackStr << "' not found\n";
+      } else {
+        fontConfig->registerFont(fallbackStr, 0, typeface->fontFamily(), typeface->fontStyle());
+        fontConfig->addFallbackFont(fallbackStr, 0);
+      }
+    } else {
+      auto commaPos = fallbackStr.find(',');
+      auto family = commaPos != std::string::npos ? fallbackStr.substr(0, commaPos) : fallbackStr;
+      auto style = commaPos != std::string::npos ? fallbackStr.substr(commaPos + 1) : std::string();
+      if (!fontConfig->registerSystemFont(family, style)) {
+        std::cerr << command << ": fallback font '" << fallbackStr << "' not found\n";
+      } else {
+        fontConfig->addFallbackSystemFont(family, style);
+      }
+    }
   }
   return true;
 }
@@ -77,99 +94,6 @@ bool WriteStringToFile(const std::string& content, const std::string& filePath,
     return false;
   }
   std::cout << command << ": wrote " << filePath << "\n";
-  return true;
-}
-
-bool HasLayerOnlyFeatures(const Layer* layer) {
-  if (!layer->id.empty() || !layer->name.empty()) {
-    return true;
-  }
-  if (!layer->visible) {
-    return true;
-  }
-  if (layer->alpha != 1.0f) {
-    return true;
-  }
-  if (layer->blendMode != BlendMode::Normal) {
-    return true;
-  }
-  if (!layer->matrix3D.isIdentity()) {
-    return true;
-  }
-  if (layer->preserve3D) {
-    return true;
-  }
-  if (!layer->antiAlias) {
-    return true;
-  }
-  if (!layer->groupOpacity) {
-    return true;
-  }
-  if (!layer->passThroughBackground) {
-    return true;
-  }
-  if (layer->hasScrollRect) {
-    return true;
-  }
-  if (layer->clipToBounds) {
-    return true;
-  }
-  if (layer->mask != nullptr) {
-    return true;
-  }
-  if (layer->maskType != MaskType::Alpha) {
-    return true;
-  }
-  if (layer->composition != nullptr) {
-    return true;
-  }
-  if (!layer->styles.empty()) {
-    return true;
-  }
-  if (!layer->filters.empty()) {
-    return true;
-  }
-  if (layer->layout != LayoutMode::None) {
-    return true;
-  }
-  if (layer->gap != 0.0f) {
-    return true;
-  }
-  if (layer->flex != 0.0f) {
-    return true;
-  }
-  if (layer->alignment != Alignment::Stretch) {
-    return true;
-  }
-  if (layer->arrangement != Arrangement::Start) {
-    return true;
-  }
-  if (!layer->includeInLayout) {
-    return true;
-  }
-  return false;
-}
-
-bool IsLayerShell(const Layer* layer) {
-  if (HasLayerOnlyFeatures(layer)) {
-    return false;
-  }
-  if (layer->x != 0.0f || layer->y != 0.0f) {
-    return false;
-  }
-  if (!layer->matrix.isIdentity()) {
-    return false;
-  }
-  if (!std::isnan(layer->width) || !std::isnan(layer->height)) {
-    return false;
-  }
-  if (!layer->padding.isZero()) {
-    return false;
-  }
-  if (!std::isnan(layer->left) || !std::isnan(layer->right) || !std::isnan(layer->top) ||
-      !std::isnan(layer->bottom) || !std::isnan(layer->centerX) || !std::isnan(layer->centerY)) {
-    return false;
-  }
   return true;
 }
 

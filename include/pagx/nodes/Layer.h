@@ -19,13 +19,16 @@
 #pragma once
 
 #include <cmath>
+#include <memory>
 #include <string>
 #include <vector>
+#include "pagx/nodes/Composition.h"
 #include "pagx/nodes/LayoutNode.h"
 #include "pagx/nodes/Element.h"
 #include "pagx/nodes/LayerFilter.h"
 #include "pagx/nodes/LayerStyle.h"
 #include "pagx/nodes/Node.h"
+#include "pagx/nodes/Timeline.h"
 #include "pagx/types/Alignment.h"
 #include "pagx/types/Arrangement.h"
 #include "pagx/types/BlendMode.h"
@@ -34,11 +37,12 @@
 #include "pagx/types/Matrix.h"
 #include "pagx/types/Matrix3D.h"
 #include "pagx/types/Padding.h"
+#include "pagx/types/Point.h"
 #include "pagx/types/Rect.h"
 
 namespace pagx {
 
-class Composition;
+class PAGXDocument;
 
 /**
  * Layer represents a layer node that can contain vector elements, layer styles, filters, and child
@@ -140,7 +144,29 @@ class Layer : public Node, public LayoutNode {
   Composition* composition = nullptr;
 
   /**
-   * The vector elements contained in this layer (shapes, painters, modifiers, etc.).
+   * External PAGX file path for the composition content. This is populated when the `composition`
+   * attribute points to a file path instead of an in-document resource reference, and is resolved by
+   * PAGXDocument::loadFileData().
+   */
+  std::string compositionFilePath = {};
+
+  /**
+   * Externally loaded PAGX document used as this layer's composition content. When set, the
+   * composition's layers and animations point into this document, and runtime timeline target lookup
+   * is resolved against this document instead of the owner document.
+   */
+  std::shared_ptr<PAGXDocument> externalDoc = nullptr;
+
+  /**
+   * Timeline entries to activate when this layer references a Composition. Each entry is a
+   * polymorphic Timeline subclass (AnimationTimeline in v1) describing a time-driven behavior to
+   * attach to the runtime sub-tree. An empty list means the composition is rendered statically
+   * with no timeline running.
+   */
+  std::vector<std::unique_ptr<Timeline>> timelines = {};
+
+  /**
+   * The vector elements contained in this layer (geometry, painters, modifiers, etc.).
    */
   std::vector<Element*> contents = {};
 
@@ -158,18 +184,6 @@ class Layer : public Node, public LayoutNode {
    * The child layers contained in this layer.
    */
   std::vector<Layer*> children = {};
-
-  /**
-   * The layout width of the layer. When set, enables constraint positioning for contents. NaN means
-   * not set.
-   */
-  float width = NAN;
-
-  /**
-   * The layout height of the layer. When set, enables constraint positioning for contents. NaN means
-   * not set.
-   */
-  float height = NAN;
 
   /**
    * The container layout mode for arranging child layers. When set to Horizontal or Vertical,
@@ -195,12 +209,16 @@ class Layer : public Node, public LayoutNode {
   Padding padding = {};
 
   /**
-   * The alignment of child elements along the cross axis. The default value is Stretch.
+   * The alignment of child elements along the cross axis. The default value is Stretch. A flex
+   * child with an explicit or percentage cross-axis size retains that size and is not stretched
+   * by `Stretch` alignment.
    */
   Alignment alignment = Alignment::Stretch;
 
   /**
-   * The arrangement of child elements along the main axis. The default value is Start.
+   * The arrangement of child elements along the main axis. The default value is Start. A flex
+   * child with an explicit or percentage main-axis size reserves that size first; only the
+   * remaining space is distributed to `flex` children according to this arrangement.
    */
   Arrangement arrangement = Arrangement::Start;
 
@@ -248,15 +266,18 @@ class Layer : public Node, public LayoutNode {
     return NodeType::Layer;
   }
 
+  /** Returns the layer position adjusted to the layout bounds. */
+  Point renderPosition() const;
+
  private:
   Layer() = default;
 
   void performContainerLayout(LayoutContext* context);
+  void updateScrollRect();
 
   void updateSize(LayoutContext* context) override;
   void onMeasure(LayoutContext* context) override;
-  void setLayoutSize(LayoutContext* context, float width, float height) override;
-  void setLayoutPosition(LayoutContext* context, float x, float y) override;
+  void setLayoutSize(LayoutContext* context, float targetWidth, float targetHeight) override;
   void updateLayout(LayoutContext* context) override;
 
   friend class PAGXDocument;

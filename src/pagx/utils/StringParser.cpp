@@ -88,6 +88,8 @@ const char* NodeTypeName(NodeType type) {
       return "InnerShadowStyle";
     case NodeType::BackgroundBlurStyle:
       return "BackgroundBlurStyle";
+    case NodeType::NoiseStyle:
+      return "NoiseStyle";
     case NodeType::BlurFilter:
       return "BlurFilter";
     case NodeType::DropShadowFilter:
@@ -98,6 +100,8 @@ const char* NodeTypeName(NodeType type) {
       return "BlendFilter";
     case NodeType::ColorMatrixFilter:
       return "ColorMatrixFilter";
+    case NodeType::NoiseFilter:
+      return "NoiseFilter";
     case NodeType::Rectangle:
       return "Rectangle";
     case NodeType::Ellipse:
@@ -177,6 +181,10 @@ DEFINE_ENUM_CONVERSION(FilterMode, FilterMode::Nearest, {FilterMode::Nearest, "n
 DEFINE_ENUM_CONVERSION(MipmapMode, MipmapMode::None, {MipmapMode::None, "none"},
                        {MipmapMode::Nearest, "nearest"}, {MipmapMode::Linear, "linear"})
 
+DEFINE_ENUM_CONVERSION(ScaleMode, ScaleMode::LetterBox, {ScaleMode::None, "none"},
+                       {ScaleMode::Stretch, "stretch"}, {ScaleMode::LetterBox, "letterBox"},
+                       {ScaleMode::Zoom, "zoom"})
+
 DEFINE_ENUM_CONVERSION(MaskType, MaskType::Alpha, {MaskType::Alpha, "alpha"},
                        {MaskType::Luminance, "luminance"}, {MaskType::Contour, "contour"})
 
@@ -239,6 +247,9 @@ DEFINE_ENUM_CONVERSION(Arrangement, Arrangement::Start, {Arrangement::Start, "st
                        {Arrangement::SpaceEvenly, "spaceEvenly"},
                        {Arrangement::SpaceAround, "spaceAround"})
 
+DEFINE_ENUM_CONVERSION(NoiseMode, NoiseMode::Mono, {NoiseMode::Mono, "mono"},
+                       {NoiseMode::Duo, "duo"}, {NoiseMode::Multi, "multi"})
+
 std::string ColorSpaceToString(ColorSpace space) {
   switch (space) {
     case ColorSpace::SRGB:
@@ -300,10 +311,9 @@ std::string ColorToHexString(const Color& color, bool withAlpha) {
 //==============================================================================
 
 std::string MatrixToString(const Matrix& matrix) {
-  char buf[256] = {};
-  snprintf(buf, sizeof(buf), "%g,%g,%g,%g,%g,%g", matrix.a, matrix.b, matrix.c, matrix.d, matrix.tx,
-           matrix.ty);
-  return std::string(buf);
+  return FloatToString(matrix.a) + "," + FloatToString(matrix.b) + "," + FloatToString(matrix.c) +
+         "," + FloatToString(matrix.d) + "," + FloatToString(matrix.tx) + "," +
+         FloatToString(matrix.ty);
 }
 
 Matrix MatrixFromString(const std::string& str) {
@@ -352,9 +362,71 @@ std::vector<float> ParseFloatList(const std::string& str) {
 }
 
 std::string FloatToString(float value) {
-  char buf[32] = {};
+  if (std::isnan(value) || std::isinf(value)) {
+    return "0";
+  }
+  if (value == 0.0f) {
+    return "0";
+  }
+  char buf[64] = {};
   snprintf(buf, sizeof(buf), "%g", value);
+  std::string s(buf);
+  // %g may pick scientific notation for very large or very small magnitudes. Re-emit those
+  // in fixed form so the result always matches the schema's decimal patterns. We deliberately
+  // do NOT snap small magnitudes to zero here: even sub-pixel residuals (e.g. sin/cos of an
+  // angle that almost lines up with a multiple of pi/2) still round-trip through XML losslessly
+  // and changing them would alter rendered output for baseline-sensitive callers.
+  if (s.find('e') != std::string::npos || s.find('E') != std::string::npos) {
+    // Use 9 fractional digits: this matches FLT_DECIMAL_DIG, the minimum precision that
+    // guarantees every distinct float value serializes to a distinct decimal string and
+    // round-trips back to the same bit pattern. Fewer digits would collapse near-denormal
+    // values (e.g. 1e-30f) onto 0 after the scientific-notation branch is rewritten. Trailing
+    // zeros are stripped below so typical values stay short.
+    snprintf(buf, sizeof(buf), "%.9f", value);
+    s = buf;
+    auto dot = s.find('.');
+    if (dot != std::string::npos) {
+      auto last = s.find_last_not_of('0');
+      if (last == dot) {
+        last--;  // strip trailing dot
+      }
+      s = s.substr(0, last + 1);
+    }
+  }
+  return s;
+}
+
+std::string CoordToString(float value) {
+  if (std::isnan(value) || std::isinf(value)) {
+    return "0";
+  }
+  float rounded = std::round(value * 100.0f) / 100.0f;
+  if (rounded == 0.0f) {
+    rounded = 0.0f;
+  }
+  char buf[32] = {};
+  snprintf(buf, sizeof(buf), "%g", rounded);
   return std::string(buf);
+}
+
+std::string CssFloatToString(float value) {
+  if (std::isnan(value) || std::isinf(value)) {
+    return "0";
+  }
+  char buf[32] = {};
+  snprintf(buf, sizeof(buf), "%.4f", value);
+  std::string s(buf);
+  if (s.find('.') != std::string::npos) {
+    size_t lastNonZero = s.find_last_not_of('0');
+    s.erase(lastNonZero + 1);
+    if (!s.empty() && s.back() == '.') {
+      s.pop_back();
+    }
+  }
+  if (s == "-0") {
+    s = "0";
+  }
+  return s;
 }
 
 Padding PaddingFromString(const std::string& str) {

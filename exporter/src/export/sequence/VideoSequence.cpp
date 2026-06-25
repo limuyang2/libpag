@@ -362,6 +362,8 @@ static void GetVideoSequence(std::shared_ptr<PAGExportSession> session,
 
     if (session->videoHasAlpha != hasAlpha) {
       session->videoHasAlpha = hasAlpha;
+      pagEncodeThread->close();
+      pagEncodeThread.reset();
       delete sequence;
       continue;
     }
@@ -413,10 +415,20 @@ static void AdjustMainCompositionParam(pag::VectorComposition* newComposition,
   newComposition->height = static_cast<int>(floor(newComposition->height * factorSize));
 
   auto& transform = newComposition->layers[0]->transform;
-  transform->anchorPoint->value.x *= factorSize;
-  transform->anchorPoint->value.y *= factorSize;
-  transform->position->value.x *= factorSize;
-  transform->position->value.y *= factorSize;
+  if (transform->anchorPoint != nullptr) {
+    transform->anchorPoint->value.x *= factorSize;
+    transform->anchorPoint->value.y *= factorSize;
+  }
+  if (transform->position != nullptr) {
+    transform->position->value.x *= factorSize;
+    transform->position->value.y *= factorSize;
+  }
+  if (transform->xPosition != nullptr) {
+    transform->xPosition->value *= factorSize;
+  }
+  if (transform->yPosition != nullptr) {
+    transform->yPosition->value *= factorSize;
+  }
 
   composition->width = sequence->width;
   composition->height = sequence->height;

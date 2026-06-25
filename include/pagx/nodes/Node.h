@@ -25,7 +25,7 @@ namespace pagx {
 
 /**
  * NodeType enumerates all types of nodes that can be stored in a PAGX document. This includes
- * resources (Image, Composition, ColorSources) and elements (shapes, painters, modifiers, etc.).
+ * resources (Image, Composition, ColorSources) and elements (geometry, painters, modifiers, etc.).
  */
 enum class NodeType {
   // Document
@@ -84,6 +84,20 @@ enum class NodeType {
    */
   Glyph,
 
+  // Animation
+  /**
+   * An animation timeline.
+   */
+  Animation,
+  /**
+   * A keyed object in an animation.
+   */
+  AnimationObject,
+  /**
+   * A keyed channel in an animation object.
+   */
+  Channel,
+
   // Layer
   /**
    * A layer node that contains vector elements and child layers.
@@ -103,6 +117,10 @@ enum class NodeType {
    * A background blur layer style.
    */
   BackgroundBlurStyle,
+  /**
+   * A noise layer style.
+   */
+  NoiseStyle,
 
   // Layer Filters
   /**
@@ -125,8 +143,12 @@ enum class NodeType {
    * A color matrix filter.
    */
   ColorMatrixFilter,
+  /**
+   * A noise filter.
+   */
+  NoiseFilter,
 
-  // Elements (shapes, painters, modifiers, containers)
+  // Elements (geometry, painters, modifiers, containers)
   /**
    * A rectangle shape with optional rounded corners.
    */
@@ -148,11 +170,11 @@ enum class NodeType {
    */
   Text,
   /**
-   * A fill painter that fills shapes with a color or gradient.
+   * A fill painter that fills geometry with a color or gradient.
    */
   Fill,
   /**
-   * A stroke painter that outlines shapes with a color or gradient.
+   * A stroke painter that outlines geometry with a color or gradient.
    */
   Stroke,
   /**

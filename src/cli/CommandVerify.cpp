@@ -20,6 +20,7 @@
 #include <libxml/parser.h>
 #include <libxml/tree.h>
 #include <libxml/xmlschemas.h>
+#include <algorithm>
 #include <cfloat>
 #include <cmath>
 #include <cstdlib>
@@ -62,6 +63,7 @@
 #include "pagx/nodes/Stroke.h"
 #include "pagx/nodes/Text.h"
 #include "pagx/nodes/TextBox.h"
+#include "pagx/nodes/TextPath.h"
 #include "pagx/nodes/TrimPath.h"
 #include "pagx_xsd.h"
 #include "tgfx/core/ImageCodec.h"
@@ -131,6 +133,9 @@ static void DetectEmptyLayer(const Layer* layer, bool parentHasLayout,
   if (!std::isnan(layer->width) || !std::isnan(layer->height)) {
     return;
   }
+  if (!std::isnan(layer->percentWidth) || !std::isnan(layer->percentHeight)) {
+    return;
+  }
   bool hasSizeDependentConstraint = (!std::isnan(layer->right) || !std::isnan(layer->bottom) ||
                                      !std::isnan(layer->centerX) || !std::isnan(layer->centerY));
   if (hasSizeDependentConstraint) {
@@ -152,13 +157,18 @@ static void DetectEmptyGroup(const Group* group, std::vector<VerifyDiagnostic>& 
   if (!std::isnan(group->width) || !std::isnan(group->height)) {
     return;
   }
+  if (!std::isnan(group->percentWidth) || !std::isnan(group->percentHeight)) {
+    return;
+  }
   bool hasSizeDependentConstraint = (!std::isnan(group->right) || !std::isnan(group->bottom) ||
                                      !std::isnan(group->centerX) || !std::isnan(group->centerY));
   if (hasSizeDependentConstraint) {
     return;
   }
+  const char* typeName = group->nodeType() == NodeType::TextBox ? "TextBox" : "Group";
   AddDiagnostic(diagnostics, group->sourceLine,
-                "empty Group with no elements. Fix: check if this Group is needed");
+                std::string("empty ") + typeName +
+                    " with no elements. Fix: check if this container is needed");
 }
 
 static void DetectZeroStrokeWidth(const Stroke* stroke,
@@ -265,6 +275,11 @@ static void CollectRefsFromElement(const Element* element, std::unordered_set<st
         refs.insert(glyphRun->font->id);
       }
     }
+  } else if (type == NodeType::TextPath) {
+    auto* textPath = static_cast<const TextPath*>(element);
+    if (textPath->path != nullptr && !textPath->path->id.empty()) {
+      refs.insert(textPath->path->id);
+    }
   }
 }
 
@@ -314,7 +329,7 @@ static void DetectUnreferencedResources(const PAGXDocument* doc,
       continue;
     }
     auto type = node->nodeType();
-    if (type == NodeType::Layer || type == NodeType::Document) {
+    if (type == NodeType::Layer || type == NodeType::Document || type == NodeType::Glyph) {
       continue;
     }
     if (refs.find(node->id) == refs.end()) {
@@ -535,6 +550,9 @@ static bool HasDefaultGroupTransform(const Group* group) {
   if (!std::isnan(group->width) || !std::isnan(group->height)) {
     return false;
   }
+  if (!std::isnan(group->percentWidth) || !std::isnan(group->percentHeight)) {
+    return false;
+  }
   return true;
 }
 
@@ -618,10 +636,6 @@ static bool IsGeometryElement(NodeType type) {
          type == NodeType::Path || type == NodeType::Text;
 }
 
-static bool IsPainterElement(NodeType type) {
-  return type == NodeType::Fill || type == NodeType::Stroke;
-}
-
 static bool ContainsRepeater(const std::vector<Element*>& elements) {
   for (auto* element : elements) {
     if (element->nodeType() == NodeType::Repeater) {
@@ -639,7 +653,7 @@ static void DetectPainterLeak(const std::vector<Element*>& elements,
   int lastPainterIndex = -1;
   for (size_t i = 0; i < elements.size(); i++) {
     auto type = elements[i]->nodeType();
-    if (!IsPainterElement(type)) {
+    if (!IsPainter(type)) {
       continue;
     }
     if (lastPainterIndex >= 0) {
@@ -686,6 +700,9 @@ static bool CanUnwrapFirstChildGroup(const Group* group) {
   if (!std::isnan(group->width) || !std::isnan(group->height)) {
     return false;
   }
+  if (!std::isnan(group->percentWidth) || !std::isnan(group->percentHeight)) {
+    return false;
+  }
   if (!std::isnan(group->left) || !std::isnan(group->right) || !std::isnan(group->top) ||
       !std::isnan(group->bottom) || !std::isnan(group->centerX) || !std::isnan(group->centerY)) {
     return false;
@@ -713,11 +730,22 @@ static void DetectRedundantFirstChildGroup(const std::vector<Element*>& elements
     return;
   }
   auto* group = static_cast<const Group*>(first);
-  if (CanUnwrapFirstChildGroup(group)) {
-    AddDiagnostic(diagnostics, group->sourceLine,
-                  "redundant first-child Group, no painter isolation needed. "
-                  "Fix: unwrap — move children into parent scope");
+  if (!CanUnwrapFirstChildGroup(group)) {
+    return;
   }
+  // Groups with customData carry intentional metadata that would be lost if unwrapped.
+  if (!group->customData.empty()) {
+    return;
+  }
+  // If there are following siblings AND the group contains painters, unwrapping would let those
+  // painters bleed onto subsequent geometry. The Group is therefore providing real painter
+  // isolation and should not be flagged.
+  if (elements.size() > 1 && HasPainter(group->elements)) {
+    return;
+  }
+  AddDiagnostic(diagnostics, group->sourceLine,
+                "redundant first-child Group, no painter isolation needed. "
+                "Fix: unwrap — move children into parent scope");
 }
 
 // ============================================================================
@@ -1132,7 +1160,7 @@ static void DetectIneffectiveLayoutAttrs(const Layer* layer, bool parentHasLayou
 // ============================================================================
 
 static bool CanDowngradeLayerToGroup(const Layer* layer) {
-  return layer->children.empty() && pagx::cli::IsLayerShell(layer);
+  return layer->children.empty() && pagx::IsLayerShell(layer);
 }
 
 static void DetectDowngradableLayers(const Layer* parentLayer,
@@ -1296,10 +1324,10 @@ static void DetectHighPathComplexity(const Path* path, std::vector<VerifyDiagnos
     return;
   }
   auto verbCount = path->data->verbs().size();
-  if (verbCount > 500) {
+  if (verbCount > 1024) {
     AddDiagnostic(diagnostics, path->sourceLine,
                   "Path with " + std::to_string(verbCount) +
-                      " verbs (> 500), may cause slow rendering. "
+                      " verbs (> 1024), may cause slow rendering. "
                       "Fix: check if path can be simplified or split");
   }
 }
@@ -1428,8 +1456,17 @@ static void DetectRectangularMask(const Layer* layer, std::vector<VerifyDiagnost
       maskLayer->contents[1]->nodeType() != NodeType::Fill) {
     return;
   }
+  auto* rect = static_cast<Rectangle*>(maskLayer->contents[0]);
+  // A rounded or reversed rectangle is NOT clip-equivalent to a plain rectangular bounds clip,
+  // so suggesting scrollRect/clipToBounds would change the rendered output.
+  if (rect->roundness != 0 || rect->reversed) {
+    return;
+  }
   auto* fill = static_cast<Fill*>(maskLayer->contents[1]);
   if (fill->alpha < 0.999f) {
+    return;
+  }
+  if (fill->color != nullptr && fill->color->nodeType() != NodeType::SolidColor) {
     return;
   }
   if (!maskLayer->matrix.isIdentity()) {
@@ -1444,6 +1481,24 @@ static void DetectRectangularMask(const Layer* layer, std::vector<VerifyDiagnost
 // Static Detection: Run All
 // ============================================================================
 
+// For Rectangle/Ellipse, detect when 'size' is fully overridden by width/height or opposite-edge
+// constraints on both axes — the animatable 'size' value then becomes dead data.
+static void DetectSizeIgnoredForRectOrEllipse(const LayoutNode* node, const Size& size,
+                                              int sourceLine,
+                                              std::vector<VerifyDiagnostic>& diagnostics) {
+  bool hasExplicitW = !std::isnan(node->width) || !std::isnan(node->percentWidth);
+  bool hasExplicitH = !std::isnan(node->height) || !std::isnan(node->percentHeight);
+  bool wFromConstraints = !std::isnan(node->left) && !std::isnan(node->right);
+  bool hFromConstraints = !std::isnan(node->top) && !std::isnan(node->bottom);
+  bool wIgnored = hasExplicitW || wFromConstraints;
+  bool hIgnored = hasExplicitH || hFromConstraints;
+  bool hasSizeAttribute = size.width != 0 || size.height != 0;
+  if (wIgnored && hIgnored && hasSizeAttribute) {
+    AddDiagnostic(diagnostics, sourceLine,
+                  "size ignored, width/height or constraints take priority. Fix: remove size");
+  }
+}
+
 static void RunStaticDetectionOnElements(const std::vector<Element*>& elements,
                                          const LineNodeMap& lineNodeMap,
                                          std::vector<VerifyDiagnostic>& diagnostics) {
@@ -1457,12 +1512,20 @@ static void RunStaticDetectionOnElements(const std::vector<Element*>& elements,
 
   for (auto* element : elements) {
     auto type = element->nodeType();
+    if (type == NodeType::Rectangle) {
+      auto* rect = static_cast<const Rectangle*>(element);
+      DetectSizeIgnoredForRectOrEllipse(rect, rect->size, element->sourceLine, diagnostics);
+    } else if (type == NodeType::Ellipse) {
+      auto* ellipse = static_cast<const Ellipse*>(element);
+      DetectSizeIgnoredForRectOrEllipse(ellipse, ellipse->size, element->sourceLine, diagnostics);
+    }
     if (type == NodeType::Group) {
       auto* group = static_cast<const Group*>(element);
       DetectEmptyGroup(group, diagnostics);
       RunStaticDetectionOnElements(group->elements, lineNodeMap, diagnostics);
     } else if (type == NodeType::TextBox) {
       auto* textBox = static_cast<const TextBox*>(element);
+      DetectEmptyGroup(textBox, diagnostics);
       RunStaticDetectionOnElements(textBox->elements, lineNodeMap, diagnostics);
     } else if (type == NodeType::Stroke) {
       auto* stroke = static_cast<const Stroke*>(element);
@@ -1573,6 +1636,15 @@ static bool RectsOverlap(const SpatialRect& a, const SpatialRect& b) {
   return a.x < b.x + b.width && a.x + a.width > b.x && a.y < b.y + b.height && a.y + a.height > b.y;
 }
 
+// Sibling overlap needs a small tolerance because auto-layout rounds child positions to integers
+// while child sizes can carry fractional text-measurement remainders. Adjacent siblings may then
+// appear to overlap by a fraction of a pixel even though the layout is visually correct.
+static bool SiblingsOverlap(const SpatialRect& a, const SpatialRect& b) {
+  constexpr float TOLERANCE = 0.5f;
+  return a.x + TOLERANCE < b.x + b.width && a.x + a.width > b.x + TOLERANCE &&
+         a.y + TOLERANCE < b.y + b.height && a.y + a.height > b.y + TOLERANCE;
+}
+
 static bool IsFullyContained(const SpatialRect& parent, const SpatialRect& child) {
   static constexpr float TOLERANCE = 0.5f;
   return (child.x + TOLERANCE) >= parent.x && (child.y + TOLERANCE) >= parent.y &&
@@ -1614,6 +1686,67 @@ static bool ElementsHaveLeafContent(const std::vector<Element*>& elements) {
   return false;
 }
 
+// Checks whether a child LayoutNode's width/height depends on its parent's resolved size through
+// opposite-edge, centering, or percent constraints. Accumulates the result into the provided
+// output flags (existing true values are preserved).
+static void UpdateSizeDependenciesFromLayoutNode(const LayoutNode* node, bool* outDependsOnW,
+                                                 bool* outDependsOnH) {
+  if (!std::isnan(node->right) || !std::isnan(node->centerX) || !std::isnan(node->percentWidth)) {
+    *outDependsOnW = true;
+  }
+  if (!std::isnan(node->bottom) || !std::isnan(node->centerY) || !std::isnan(node->percentHeight)) {
+    *outDependsOnH = true;
+  }
+}
+
+// Walks a list of child elements and accumulates whether any of them depend on the parent's
+// resolved size through size-sensitive layout constraints.
+static void CollectChildrenSizeDependencies(const std::vector<Element*>& elements,
+                                            bool* outDependsOnW, bool* outDependsOnH) {
+  for (auto* element : elements) {
+    auto* node = LayoutNode::AsLayoutNode(element);
+    if (node == nullptr) {
+      continue;
+    }
+    UpdateSizeDependenciesFromLayoutNode(node, outDependsOnW, outDependsOnH);
+  }
+}
+
+static void DetectZeroSizeGroup(const Group* group, std::vector<VerifyDiagnostic>& diagnostics) {
+  auto bounds = group->layoutBounds();
+  if (bounds.width != 0 && bounds.height != 0) {
+    return;
+  }
+  if (!ElementsHaveLeafContent(group->elements)) {
+    return;
+  }
+  // Skip when an explicit zero size is authored — the user intentionally collapsed this group.
+  bool explicitZeroW =
+      (bounds.width == 0 && !std::isnan(group->width) && group->width == 0) ||
+      (bounds.width == 0 && !std::isnan(group->percentWidth) && group->percentWidth == 0);
+  bool explicitZeroH =
+      (bounds.height == 0 && !std::isnan(group->height) && group->height == 0) ||
+      (bounds.height == 0 && !std::isnan(group->percentHeight) && group->percentHeight == 0);
+  if (explicitZeroW || explicitZeroH) {
+    return;
+  }
+  // Only report when at least one child depends on the group size (opposite-edge, centering,
+  // or percent).
+  bool childrenDependOnWidth = false;
+  bool childrenDependOnHeight = false;
+  CollectChildrenSizeDependencies(group->elements, &childrenDependOnWidth, &childrenDependOnHeight);
+  bool zeroWidthMatters = bounds.width == 0 && childrenDependOnWidth;
+  bool zeroHeightMatters = bounds.height == 0 && childrenDependOnHeight;
+  if (!zeroWidthMatters && !zeroHeightMatters) {
+    return;
+  }
+  std::ostringstream oss;
+  oss << "zero size (" << static_cast<int>(bounds.width) << "x" << static_cast<int>(bounds.height)
+      << "), children depend on this container for layout. Fix: check why this container has no "
+         "size";
+  AddDiagnostic(diagnostics, group->sourceLine, oss.str());
+}
+
 static void DetectZeroSize(const Layer* layer, const Layer* parentLayer,
                            std::vector<VerifyDiagnostic>& diagnostics) {
   auto bounds = layer->layoutBounds();
@@ -1626,8 +1759,12 @@ static void DetectZeroSize(const Layer* layer, const Layer* parentLayer,
   bool inParentLayout =
       parentLayer != nullptr && parentLayer->layout != LayoutMode::None && layer->includeInLayout;
   if (!inParentLayout) {
-    bool explicitZeroW = (bounds.width == 0 && !std::isnan(layer->width) && layer->width == 0);
-    bool explicitZeroH = (bounds.height == 0 && !std::isnan(layer->height) && layer->height == 0);
+    bool explicitZeroW =
+        (bounds.width == 0 && !std::isnan(layer->width) && layer->width == 0) ||
+        (bounds.width == 0 && !std::isnan(layer->percentWidth) && layer->percentWidth == 0);
+    bool explicitZeroH =
+        (bounds.height == 0 && !std::isnan(layer->height) && layer->height == 0) ||
+        (bounds.height == 0 && !std::isnan(layer->percentHeight) && layer->percentHeight == 0);
     if (explicitZeroW || explicitZeroH) {
       return;
     }
@@ -1637,12 +1774,7 @@ static void DetectZeroSize(const Layer* layer, const Layer* parentLayer,
   bool childrenDependOnWidth = false;
   bool childrenDependOnHeight = false;
   for (auto* child : layer->children) {
-    if (!std::isnan(child->right) || !std::isnan(child->centerX)) {
-      childrenDependOnWidth = true;
-    }
-    if (!std::isnan(child->bottom) || !std::isnan(child->centerY)) {
-      childrenDependOnHeight = true;
-    }
+    UpdateSizeDependenciesFromLayoutNode(child, &childrenDependOnWidth, &childrenDependOnHeight);
     if (child->flex > 0 && layer->layout == LayoutMode::Horizontal) {
       childrenDependOnWidth = true;
     }
@@ -1650,6 +1782,9 @@ static void DetectZeroSize(const Layer* layer, const Layer* parentLayer,
       childrenDependOnHeight = true;
     }
   }
+  // VectorElements in layer->contents also consult the parent size for opposite-edge or percent
+  // constraints — treat them as size-dependent too.
+  CollectChildrenSizeDependencies(layer->contents, &childrenDependOnWidth, &childrenDependOnHeight);
   bool zeroWidthMatters = bounds.width == 0 && (hasLayoutChildren || childrenDependOnWidth);
   bool zeroHeightMatters = bounds.height == 0 && (hasLayoutChildren || childrenDependOnHeight);
   if (!zeroWidthMatters && !zeroHeightMatters && !inParentLayout) {
@@ -1723,6 +1858,10 @@ static bool IsMainAxisContentMeasured(const Layer* layer, const Layer* parentLay
   if (!std::isnan(explicitMain)) {
     return false;
   }
+  float percentMain = horizontal ? layer->percentWidth : layer->percentHeight;
+  if (!std::isnan(percentMain)) {
+    return false;
+  }
   bool mainFromConstraints = horizontal ? (!std::isnan(layer->left) && !std::isnan(layer->right))
                                         : (!std::isnan(layer->top) && !std::isnan(layer->bottom));
   if (mainFromConstraints) {
@@ -1756,6 +1895,9 @@ static void DetectFlexInContentMeasuredParent(const Layer* layer, const Layer* p
   }
   bool horizontal = parentLayer->layout == LayoutMode::Horizontal;
   if (!std::isnan(horizontal ? layer->width : layer->height)) {
+    return;
+  }
+  if (!std::isnan(horizontal ? layer->percentWidth : layer->percentHeight)) {
     return;
   }
   if (!IsMainAxisContentMeasured(parentLayer, grandparentLayer)) {
@@ -1817,6 +1959,9 @@ static void DetectContentOriginOffset(const Layer* layer, const Layer* parentLay
   if (!std::isnan(layer->width) || !std::isnan(layer->height)) {
     return;
   }
+  if (!std::isnan(layer->percentWidth) || !std::isnan(layer->percentHeight)) {
+    return;
+  }
   bool sizeFromConstraints = (!std::isnan(layer->left) && !std::isnan(layer->right)) &&
                              (!std::isnan(layer->top) && !std::isnan(layer->bottom));
   if (sizeFromConstraints) {
@@ -1840,6 +1985,9 @@ static void DetectContentOriginOffset(const Layer* layer, const Layer* parentLay
 static void DetectContentOriginOffsetForGroup(const Group* group,
                                               std::vector<VerifyDiagnostic>& diagnostics) {
   if (!std::isnan(group->width) || !std::isnan(group->height)) {
+    return;
+  }
+  if (!std::isnan(group->percentWidth) || !std::isnan(group->percentHeight)) {
     return;
   }
   bool sizeFromConstraints = (!std::isnan(group->left) && !std::isnan(group->right)) &&
@@ -1877,7 +2025,7 @@ static void DetectOverlappingSiblings(const Layer* parentLayer,
   }
   for (size_t i = 0; i < layoutChildren.size(); i++) {
     for (size_t j = i + 1; j < layoutChildren.size(); j++) {
-      if (RectsOverlap(layoutChildren[i].second, layoutChildren[j].second)) {
+      if (SiblingsOverlap(layoutChildren[i].second, layoutChildren[j].second)) {
         auto& a = layoutChildren[i];
         auto& b = layoutChildren[j];
         std::vector<int> lines = {a.first->sourceLine, b.first->sourceLine};
@@ -1918,6 +2066,39 @@ static void DetectConstraintConflicts(const LayoutNode* node, int sourceLine,
       AddDiagnostic(diagnostics, sourceLine,
                     "bottom ignored, centerY takes priority. Fix: remove bottom");
     }
+  }
+  // Priority on the width axis: left+right > percentWidth > authored width. Explicit width vs
+  // percentWidth cannot coexist in XML (single attribute with or without '%'), so only the
+  // opposite-edge vs percent collision is reportable here.
+  bool wFromOpposite = !std::isnan(node->left) && !std::isnan(node->right);
+  if (wFromOpposite && !std::isnan(node->percentWidth)) {
+    AddDiagnostic(diagnostics, sourceLine,
+                  "percentWidth ignored, left+right constraints take priority. "
+                  "Fix: remove percentWidth");
+  }
+  bool hFromOpposite = !std::isnan(node->top) && !std::isnan(node->bottom);
+  if (hFromOpposite && !std::isnan(node->percentHeight)) {
+    AddDiagnostic(diagnostics, sourceLine,
+                  "percentHeight ignored, top+bottom constraints take priority. "
+                  "Fix: remove percentHeight");
+  }
+}
+
+// Flag explicit width/height that is shadowed by opposite-edge constraints. The layout priority is
+// left+right > percentWidth > authored width (top+bottom analogous for height), so when both
+// opposite edges are set the authored width/height contributes nothing. percentWidth/percentHeight
+// collisions are reported by DetectConstraintConflicts for all LayoutNode types.
+static void DetectExplicitSizeShadowedByOppositeEdge(const LayoutNode* node, int sourceLine,
+                                                     std::vector<VerifyDiagnostic>& diagnostics) {
+  bool wFromConstraints = !std::isnan(node->left) && !std::isnan(node->right);
+  bool hFromConstraints = !std::isnan(node->top) && !std::isnan(node->bottom);
+  if (wFromConstraints && !std::isnan(node->width)) {
+    AddDiagnostic(diagnostics, sourceLine,
+                  "width ignored, left+right constraints take priority. Fix: remove width");
+  }
+  if (hFromConstraints && !std::isnan(node->height)) {
+    AddDiagnostic(diagnostics, sourceLine,
+                  "height ignored, top+bottom constraints take priority. Fix: remove height");
   }
 }
 
@@ -1996,10 +2177,11 @@ static void DetectContainerOverflow(const Layer* parentLayer,
   }
   bool horizontal = parentLayer->layout == LayoutMode::Horizontal;
   float explicitMain = horizontal ? parentLayer->width : parentLayer->height;
+  float percentMain = horizontal ? parentLayer->percentWidth : parentLayer->percentHeight;
   bool mainFromConstraints =
       horizontal ? (!std::isnan(parentLayer->left) && !std::isnan(parentLayer->right))
                  : (!std::isnan(parentLayer->top) && !std::isnan(parentLayer->bottom));
-  if (std::isnan(explicitMain) && !mainFromConstraints) {
+  if (std::isnan(explicitMain) && std::isnan(percentMain) && !mainFromConstraints) {
     return;
   }
   auto parentBounds = parentLayer->layoutBounds();
@@ -2020,8 +2202,14 @@ static void DetectContainerOverflow(const Layer* parentLayer,
     }
     visibleCount++;
     float childExplicitMain = horizontal ? child->width : child->height;
+    float childPercentMain = horizontal ? child->percentWidth : child->percentHeight;
     if (!std::isnan(childExplicitMain)) {
       totalFixed += childExplicitMain;
+    } else if (!std::isnan(childPercentMain)) {
+      // A percentage-sized child scales with the parent; its exact contribution cannot be
+      // determined statically. Treat it as 0 (optimistic) so fixed-child overflow from the
+      // remaining siblings is still detectable.
+      continue;
     } else if (child->flex > 0) {
       hasFlex = true;
     } else {
@@ -2105,6 +2293,9 @@ static bool IsContentMeasuredContainer(const Group* group) {
   if (!std::isnan(group->width) || !std::isnan(group->height)) {
     return false;
   }
+  if (!std::isnan(group->percentWidth) || !std::isnan(group->percentHeight)) {
+    return false;
+  }
   bool wFromConstraints = !std::isnan(group->left) && !std::isnan(group->right);
   bool hFromConstraints = !std::isnan(group->top) && !std::isnan(group->bottom);
   return !wFromConstraints && !hFromConstraints;
@@ -2112,6 +2303,9 @@ static bool IsContentMeasuredContainer(const Group* group) {
 
 static bool IsContentMeasuredContainer(const Layer* layer, const Layer* parentLayer) {
   if (!std::isnan(layer->width) || !std::isnan(layer->height)) {
+    return false;
+  }
+  if (!std::isnan(layer->percentWidth) || !std::isnan(layer->percentHeight)) {
     return false;
   }
   bool wFromConstraints = !std::isnan(layer->left) && !std::isnan(layer->right);
@@ -2337,12 +2531,23 @@ static void RunSpatialDetectionOnElements(const std::vector<Element*>& elements,
       DetectConstraintConflicts(layoutNode, element->sourceLine, diagnostics);
       DetectNegativeConstraintSizeForElement(layoutNode, element->sourceLine, containerW,
                                              containerH, diagnostics);
+      DetectRedundantZeroConstraints(layoutNode, element->sourceLine, diagnostics);
+      // Only Rectangle / Ellipse / Group use width/height purely for layout sizing. TextBox keeps
+      // this->width/height as the authored text-box dimensions for shaping (independent semantic),
+      // so it is excluded here. Path / Polystar / Text / TextPath use width/height to drive
+      // uniform scaling, still useful alongside edge constraints; they are also excluded. Note:
+      // percentWidth/Height collisions with opposite edges are reported by
+      // DetectConstraintConflicts for all LayoutNode types.
+      if (type == NodeType::Rectangle || type == NodeType::Ellipse || type == NodeType::Group) {
+        DetectExplicitSizeShadowedByOppositeEdge(layoutNode, element->sourceLine, diagnostics);
+      }
     }
     if (type == NodeType::Group) {
       auto* group = static_cast<const Group*>(element);
       if (IsContentMeasuredContainer(group)) {
         DetectIneffectiveCentering(group->elements, diagnostics);
       }
+      DetectZeroSizeGroup(group, diagnostics);
       DetectContentOriginOffsetForGroup(group, diagnostics);
       DetectContentCenteringAsymmetry(group, diagnostics);
       DetectStretchFillAffectedByPadding(group->elements, group->padding, diagnostics);
@@ -2352,6 +2557,13 @@ static void RunSpatialDetectionOnElements(const std::vector<Element*>& elements,
     } else if (type == NodeType::TextBox) {
       auto* textBox = static_cast<const TextBox*>(element);
       DetectNestedTextBox(textBox, parentTextBox, diagnostics);
+      if (IsContentMeasuredContainer(textBox)) {
+        DetectIneffectiveCentering(textBox->elements, diagnostics);
+      }
+      DetectZeroSizeGroup(textBox, diagnostics);
+      DetectContentOriginOffsetForGroup(textBox, diagnostics);
+      DetectContentCenteringAsymmetry(textBox, diagnostics);
+      DetectStretchFillAffectedByPadding(textBox->elements, textBox->padding, diagnostics);
       auto bounds = textBox->layoutBounds();
       RunSpatialDetectionOnElements(textBox->elements, textBox, bounds.width, bounds.height,
                                     diagnostics);
@@ -2382,6 +2594,7 @@ static void RunSpatialDetectionOnLayer(const Layer* layer, const Layer* parentLa
   DetectContentCenteringAsymmetry(layer, parentLayer, diagnostics);
   DetectOverlappingSiblings(layer, diagnostics);
   DetectConstraintConflicts(layer, layer->sourceLine, diagnostics);
+  DetectExplicitSizeShadowedByOppositeEdge(layer, layer->sourceLine, diagnostics);
   DetectRedundantZeroConstraints(layer, layer->sourceLine, diagnostics);
   DetectStretchFillAffectedByPadding(layer->contents, layer->padding, diagnostics);
   DetectChildExceedingParent(layer, diagnostics);

@@ -82,7 +82,7 @@ PAGX 是纯 XML 文件（`.pagx`），可引用外部资源文件（图片、视
 
 ```xml
 <Layer data-name="背景图层" data-figma-id="12:34" data-exported-by="PAGExporter">
-  <Rectangle size="100,100"/>
+  <Rectangle width="100" height="100"/>
   <Fill color="#FF0000"/>
 </Layer>
 ```
@@ -97,6 +97,7 @@ PAGX 是纯 XML 文件（`.pagx`），可引用外部资源文件（图片、视
 | `string` | 字符串 | `"Arial"`、`"myLayer"` |
 | `enum` | 枚举值 | `normal`、`multiply` |
 | `idref` | ID 引用 | `@gradientId`、`@maskLayer` |
+| `Dimension` | 非负浮点数（像素），或其后跟 `%` 表示相对父容器对应轴（内缩 padding 后）的百分比。 | `100`、`0.5`、`50%`、`100%` |
 
 ### 2.5 点（Point）
 
@@ -334,8 +335,9 @@ PathData 定义可复用的路径数据，供 Path 元素和 TextPath 修改器�
 | 属性 | 类型 | 默认值 | 说明 |
 |------|------|--------|------|
 | `startPoint` | Point | `0,0` | 起点 |
-| `endPoint` | Point | (必填) | 终点 |
-| `matrix` | Matrix | 单位矩阵 | 变换矩阵 |
+| `endPoint` | Point | `1,0` | 终点 |
+| `matrix` | Matrix | 单位矩阵 | 在所选坐标空间中叠加的变换矩阵，详见[颜色源坐标系统](#颜色源坐标系统) |
+| `fitsToGeometry` | boolean | true | 渐变的坐标空间。`true` 时为几何元素自身包围盒的归一化 0-1 坐标系；`false` 时为父级容器（Layer 或 Group）的坐标系。详见[颜色源坐标系统](#颜色源坐标系统) |
 
 **计算**：对于点 P，其颜色由 P 在起点-终点连线上的投影位置决定。
 
@@ -347,9 +349,10 @@ PathData 定义可复用的路径数据，供 Path 元素和 TextPath 修改器�
 
 | 属性 | 类型 | 默认值 | 说明 |
 |------|------|--------|------|
-| `center` | Point | 0,0 | 中心点 |
-| `radius` | float | (必填) | 渐变半径 |
-| `matrix` | Matrix | 单位矩阵 | 变换矩阵 |
+| `center` | Point | `0.5,0.5` | 中心点 |
+| `radius` | float | `0.5` | 渐变半径 |
+| `matrix` | Matrix | 单位矩阵 | 在所选坐标空间中叠加的变换矩阵，详见[颜色源坐标系统](#颜色源坐标系统) |
+| `fitsToGeometry` | boolean | true | 渐变的坐标空间。`true` 时为几何元素自身包围盒的归一化 0-1 坐标系；`false` 时为父级容器（Layer 或 Group）的坐标系。详见[颜色源坐标系统](#颜色源坐标系统) |
 
 **计算**：对于点 P，其颜色由 `distance(P, center) / radius` 决定。
 
@@ -361,10 +364,11 @@ PathData 定义可复用的路径数据，供 Path 元素和 TextPath 修改器�
 
 | 属性 | 类型 | 默认值 | 说明 |
 |------|------|--------|------|
-| `center` | Point | 0,0 | 中心点 |
+| `center` | Point | `0.5,0.5` | 中心点 |
 | `startAngle` | float | 0 | 起始角度 |
 | `endAngle` | float | 360 | 结束角度 |
-| `matrix` | Matrix | 单位矩阵 | 变换矩阵 |
+| `matrix` | Matrix | 单位矩阵 | 在所选坐标空间中叠加的变换矩阵，详见[颜色源坐标系统](#颜色源坐标系统) |
+| `fitsToGeometry` | boolean | true | 渐变的坐标空间。`true` 时为几何元素自身包围盒的归一化 0-1 坐标系；`false` 时为父级容器（Layer 或 Group）的坐标系。详见[颜色源坐标系统](#颜色源坐标系统) |
 
 **计算**：对于点 P，其颜色由 `atan2(P.y - center.y, P.x - center.x)` 在 `[startAngle, endAngle]` 范围内的比例决定。
 
@@ -385,9 +389,10 @@ PathData 定义可复用的路径数据，供 Path 元素和 TextPath 修改器�
 
 | 属性 | 类型 | 默认值 | 说明 |
 |------|------|--------|------|
-| `center` | Point | 0,0 | 中心点 |
-| `radius` | float | (必填) | 渐变半径 |
-| `matrix` | Matrix | 单位矩阵 | 变换矩阵 |
+| `center` | Point | `0.5,0.5` | 中心点 |
+| `radius` | float | `0.5` | 渐变半径 |
+| `matrix` | Matrix | 单位矩阵 | 在所选坐标空间中叠加的变换矩阵，详见[颜色源坐标系统](#颜色源坐标系统) |
+| `fitsToGeometry` | boolean | true | 渐变的坐标空间。`true` 时为几何元素自身包围盒的归一化 0-1 坐标系；`false` 时为父级容器（Layer 或 Group）的坐标系。详见[颜色源坐标系统](#颜色源坐标系统) |
 
 **计算**：对于点 P，其颜色由切比雪夫距离 `max(|P.x - center.x|, |P.y - center.y|) / radius` 决定。
 
@@ -423,11 +428,12 @@ PathData 定义可复用的路径数据，供 Path 元素和 TextPath 修改器�
 | 属性 | 类型 | 默认值 | 说明 |
 |------|------|--------|------|
 | `image` | string | (必填) | 图片来源：`@id` 资源引用、文件路径或 data URI |
-| `tileModeX` | TileMode | clamp | X 方向平铺模式 |
-| `tileModeY` | TileMode | clamp | Y 方向平铺模式 |
+| `tileModeX` | TileMode | decal | X 方向平铺模式 |
+| `tileModeY` | TileMode | decal | Y 方向平铺模式 |
 | `filterMode` | FilterMode | linear | 纹理过滤模式 |
 | `mipmapMode` | MipmapMode | linear | Mipmap 模式 |
-| `matrix` | Matrix | 单位矩阵 | 变换矩阵 |
+| `matrix` | Matrix | 单位矩阵 | 作用于图片本地坐标系的变换矩阵，详见[颜色源坐标系统](#颜色源坐标系统) |
+| `scaleMode` | ScaleMode | letterBox | 将变换后的图片适配到每个几何元素包围盒时使用的缩放规则。为 `none` 时图片直接放置在父级容器（Layer 或 Group）的坐标系中、不做适配，详见[颜色源坐标系统](#颜色源坐标系统) |
 
 **TileMode（平铺模式）**：`clamp`（钳制）、`repeat`（重复）、`mirror`（镜像）、`decal`（贴花）
 
@@ -435,26 +441,39 @@ PathData 定义可复用的路径数据，供 Path 元素和 TextPath 修改器�
 
 **MipmapMode（Mipmap 模式）**：`none`（禁用）、`nearest`（最近级别）、`linear`（线性插值）
 
+**ScaleMode（缩放模式）**：`none`（不适配）、`stretch`（拉伸）、`letterBox`（等比缩放留白）、`zoom`（等比缩放裁剪）
+
 **完整示例**：演示不同平铺模式的图片填充
 
 > [Sample](samples/image_pattern.pagx)
 
 ##### 颜色源坐标系统
 
-除纯色外，所有颜色源（渐变、图片填充）都有坐标系的概念，其坐标系**相对于几何元素的局部坐标系原点**。可通过 `matrix` 属性对颜色源坐标系应用变换。
+除纯色外，所有颜色源（渐变、图片填充）都通过自己的属性，在两种坐标空间之间二选一：
 
-**变换行为**：
+- **渐变**：由 `fitsToGeometry` 控制（默认 `true`）。
+- **ImagePattern**：由 `scaleMode` 控制（默认 `letterBox`）；任何非 `none` 的取值都启用按几何元素适配，`scaleMode="none"` 切换到绝对坐标。
 
-1. **外部变换会同时作用于几何和颜色源**：Group 的变换、Layer 的矩阵等外部变换会整体作用于几何元素及其颜色源，两者一起缩放、旋转、平移。
+**相对坐标（默认 — 按几何元素适配）**：
 
-2. **修改几何属性不影响颜色源**：直接修改几何元素的属性（如 Rectangle 的 width/height、Path 的路径数据）只改变几何内容本身，不会影响颜色源的坐标系。
+渐变参数（`startPoint`、`endPoint`、`center`、`radius` 等）位于 `(0, 0)`-`(1, 1)` 的归一化空间，映射到**每个几何元素自身的包围盒**；ImagePattern 图片按 `scaleMode` 适配每个几何元素的包围盒。填充随几何尺寸自动伸缩，多个不同尺寸的几何元素共用同一颜色源时，每个几何元素都获得自己适配后的填充。
 
-**示例**：在 300×300 的区域内绘制一个对角线方向的线性渐变：
+**绝对坐标（可选 — `fitsToGeometry="false"` / `scaleMode="none"`）**：
+
+参数位于**父级容器（Layer 或 Group）的坐标系**中，原点在 `(0, 0)`。同一容器下的多个几何元素共用一份连续填充；改几何尺寸不会再缩放填充，但对父级容器施加变换会让两者一起移动。
+
+`matrix` 属性在上述坐标之上叠加：
+
+- **渐变**：在所选坐标空间下叠加，对所有渐变参数统一生效。
+- **ImagePattern**：作用于图片本地坐标系（原始图片 rect，原点在左上），先对图片做变换，然后再按 `scaleMode` 放进几何元素。
+
+**示例**：在 Layer 内的 300×300 矩形上以绝对坐标绘制线性渐变：
 
 > [Sample](samples/color_source_coordinates.pagx)
 
-- 对该图层应用 `scale(2, 2)` 变换：矩形变为 600×600，渐变也随之放大，视觉效果保持一致
-- 直接将 Rectangle 的 size 改为 600,600：矩形变为 600×600，但渐变坐标不变，只覆盖矩形的左上四分之一
+- `fitsToGeometry="false"` + 给父 Layer 设 `scale(2, 2)`：矩形变为 600×600，渐变随之放大。
+- `fitsToGeometry="false"` + 直接把 Rectangle 的 `width`/`height` 改为 600×600：矩形放大，但渐变仍锚定在 Layer，只覆盖左上四分之一。
+- 默认 `fitsToGeometry="true"`：渐变始终按矩形当前包围盒重新适配。
 
 #### 3.3.4 合成（Composition）
 
@@ -548,8 +567,8 @@ PAGX 文档采用层级结构组织内容：
 
 **约束定位中**（无容器布局或子 Layer 设 `includeInLayout="false"`）：
 1. **对边约束**：对边同设约束（`left`+`right` 或 `top`+`bottom`）从父容器推导尺寸（如 `width = 父.width - left - right`），**始终覆盖**显式尺寸
-2. **显式声明**：直接设置 `width`/`height` 属性
-3. **内容测量**：当元素既无显式尺寸也无对边约束时，引擎自动从内容边界计算尺寸——容器会被内容撑大。
+2. **显式 `width`/`height`**（包括百分比值）：直接设置 `width`/`height` 属性。百分比值（如 `50%`）从父容器**内缩 padding 后**的布局尺寸推导（如 `width = (父.width - 父.padding.left - 父.padding.right) × 0.5`）。如果父容器对应轴仍在解析中（内容测量型父容器的第一轮），百分比值此时无法求解，子元素在该轴上回退到自身的首选尺寸。
+3. **内容测量**：当以上都未设置时，引擎自动从内容边界计算尺寸——容器会被内容撑大。
 
    对 Group 和 Layer，测量值从本地原点 (0,0) 到所有内部元素内容边界（含约束贡献的边距）的右下角坐标，确保测量结果不受内部元素排放位置的影响。对 Text，测量值为行盒边界（字形推进宽度之和 × 字体指标行高）。
 
@@ -630,13 +649,13 @@ PAGX 文档采用层级结构组织内容：
 
 #### 背景填充与 Padding
 
-由于 `padding` 会内缩所有内容的约束参考系，在有 padding 的 Layer 中使用 `left="0" right="0" top="0" bottom="0"` 的背景 Rectangle 只会填满内缩后的区域。如果背景需要铺满整个 Layer，应使用双层结构：外层放置背景，内层承载 `padding`：
+由于 `padding` 会内缩所有内容的约束参考系，在有 padding 的 Layer 中使用 `width="100%" height="100%"` 的背景 Rectangle 只会填满内缩后的区域。如果背景需要铺满整个 Layer，应使用双层结构：外层放置背景，内层承载 `padding`：
 
 ```xml
 <Layer width="300" height="200">
-  <Rectangle left="0" right="0" top="0" bottom="0" roundness="12"/>
+  <Rectangle width="100%" height="100%" roundness="12"/>
   <Fill color="#FFF"/>
-  <Layer left="0" right="0" top="0" bottom="0" layout="horizontal" gap="8" padding="16">
+  <Layer width="100%" height="100%" layout="horizontal" gap="8" padding="16">
     <!-- 内容 -->
   </Layer>
 </Layer>
@@ -660,7 +679,7 @@ PAGX 文档采用层级结构组织内容：
   <Layer><!-- 参与布局 --></Layer>
   <!-- 角标：脱离布局流，使用 left/top 约束定位 -->
   <Layer left="370" top="10" includeInLayout="false">
-    <Ellipse size="24,24"/>
+    <Ellipse width="24" height="24"/>
     <Fill color="#EF4444"/>
   </Layer>
 </Layer>
@@ -697,6 +716,8 @@ PAGX 文档采用层级结构组织内容：
 | `bottom` | float | - | 下边缘到容器下边缘的距离 |
 | `centerX` | float | - | 相对容器水平中心的偏移（0 = 水平居中） |
 | `centerY` | float | - | 相对容器垂直中心的偏移（0 = 垂直居中） |
+| `width` | Dimension | - | 布局宽度；支持像素（如 `100`）或相对容器的百分比（如 `50%`） |
+| `height` | Dimension | - | 布局高度；支持像素（如 `100`）或相对容器的百分比（如 `50%`） |
 
 **组合规则**：每个轴上只能使用以下组合之一：单边定位（`left`、`right`、`centerX` 任选其一），或对边约束（`left` + `right`）。垂直轴同理（`top` / `bottom` / `centerY`，或 `top` + `bottom`）。如果同一轴上设置了多种组合，引擎按以下优先级解决冲突：`centerX` > `left`+`right` > `left` > `right`（垂直轴同理：`centerY` > `top`+`bottom` > `top` > `bottom`）。低优先级的约束被静默忽略。
 
@@ -735,17 +756,23 @@ centerX=C:  tx = (W/2 + C) - B.centerX
 
 > [Sample](samples/constraint_single_edge_center.pagx)
 
-#### 对边约束
+#### 对边约束与百分比尺寸
 
-同时设置 `left` + `right`（或 `top` + `bottom`）定义一个目标区域（容器尺寸减去两侧间距）。不同节点类型的响应方式：
+对边约束与百分比尺寸都是从父容器推导目标尺寸：
 
-| 元素 | 对边行为 | 说明 |
-|------|---------|------|
+- **对边约束**（`left` + `right` 或 `top` + `bottom`）：`target = 容器尺寸 - L - R`
+- **百分比尺寸**（`width="N%"` / `height="N%"`）：`target = 容器内缩尺寸 × N / 100`，其中「容器内缩尺寸」为父容器该轴布局尺寸减去 `padding`
+
+不同节点类型对推导出的目标尺寸响应方式不同：
+
+| 元素 | 行为 | 说明 |
+|------|------|------|
 | Rectangle、Ellipse | 拉伸形状 | 修改 `size` 填满目标区域，改变渲染形状 |
 | TextBox | 拉伸排版区域 | 修改 `width` 和 `height` 填满目标区域，改变文字排版范围 |
-| Group | 推导布局尺寸 | 对齐目标区域并设置布局尺寸，内部子元素按新尺寸重新布局，不影响渲染 |
-| 子 Layer | 推导尺寸 | 始终从父容器推导该维度的尺寸（`width = 父.width - left - right`），覆盖显式 `width`/`height` |
-| Polystar、Path、Text、TextPath | 等比缩放适配 | 单轴对边约束时紧贴该轴边界等比缩放；双轴对边约束时取两轴中较小的缩放因子（fit 模式），在较长轴方向居中 |
+| Group、Layer | 推导布局尺寸 | 将布局宽/高设为目标尺寸，内部子元素按新尺寸重新布局，不影响渲染。子 Layer 的情况下，该推导覆盖显式 `width`/`height` |
+| Polystar、Path、Text、TextPath | 等比缩放适配 | 单轴设置时紧贴该轴边界等比缩放；双轴设置时取两轴中较小的缩放因子（fit 模式），在较长轴方向居中。Polystar 使用其外框尺寸（outerRadius×2 × outerRadius×2）参与缩放计算 |
+
+同一轴上同时设置百分比尺寸与对边约束时，对边约束优先（见 §4.1 第 1 步）。仅在单轴上设置百分比尺寸时，另一轴回退到首选尺寸，除非另有约束指定其尺寸。
 
 **拉伸**（Rectangle、Ellipse、TextBox）：
 
@@ -1145,7 +1172,7 @@ VectorElement 系统采用**累积-渲染**的处理模型：几何元素在渲�
 
 | 术语 | 包含元素 | 说明 |
 |------|----------|------|
-| **几何元素** | Rectangle、Ellipse、Polystar、Path、Text | 提供几何形状的元素，在上下文中累积为几何列表 |
+| **几何元素** | Rectangle、Ellipse、Polystar、Path、Text | 可渲染的几何（形状和文本），在上下文中累积为几何列表 |
 | **修改器** | TrimPath、RoundCorner、MergePath、TextModifier、TextPath、TextBox、Repeater | 对累积的几何进行变换 |
 | **绘制器** | Fill、Stroke | 对累积的几何进行填充或描边渲染 |
 | **容器** | Group | 创建独立作用域并应用矩阵变换，处理完成后合并 |
@@ -1202,24 +1229,24 @@ VectorElement 按**文档顺序**依次处理，文档中靠前的元素先处�
 
 ### 6.2 几何元素（Geometry Elements）
 
-几何元素提供可渲染的形状。所有几何元素以及 TextPath、TextBox 和 Group 都支持约束属性（`left`、`right`、`top`、`bottom`、`centerX`、`centerY`）用于容器内定位——定义和行为见 §4.3。各元素属性表中不再重复列出约束属性。
+几何元素提供可渲染的几何（形状和文本）。所有几何元素以及 TextPath、TextBox 和 Group 都支持约束属性用于容器内定位——完整属性列表、定义和行为见 §4.3。各元素属性表中不再重复列出约束属性。
 
 #### 6.2.1 矩形（Rectangle）
 
 矩形从中心点定义，支持统一圆角。
 
 ```xml
-<Rectangle size="200,150" roundness="10" reversed="false"/>
+<Rectangle width="200" height="150" roundness="10" reversed="false"/>
 ```
 
 | 属性 | 类型 | 默认值 | 说明 |
 |------|------|--------|------|
-| `position` | Point | (bounding box 中心) | 中心点坐标，设置约束属性时由约束系统自动计算。未设置时默认为 `(size.width/2, size.height/2)`，使左上角对齐原点。推荐使用约束属性（`left`/`top`）进行定位 |
-| `size` | Size | 0,0 | 尺寸 "width,height" |
+| `position` | Point | (bounding box 中心) | 中心点坐标，可动画。设置约束属性时由约束系统自动计算。未设置时默认为 `(size.width/2, size.height/2)`，使左上角对齐原点。静态布局推荐使用约束属性 |
+| `size` | Size | 0,0 | 尺寸 "width,height"，可动画。静态布局建议使用 `width`/`height` 属性 |
 | `roundness` | float | 0 | 圆角半径 |
 | `reversed` | bool | false | 反转路径方向 |
 
-矩形支持所有约束属性（见 §4.1）。
+矩形支持所有约束属性（见 §4.3）。
 
 **计算规则**：
 ```
@@ -1244,16 +1271,16 @@ rect.bottom = position.y + size.height / 2
 椭圆从中心点定义。
 
 ```xml
-<Ellipse size="100,60" reversed="false"/>
+<Ellipse width="100" height="60" reversed="false"/>
 ```
 
 | 属性 | 类型 | 默认值 | 说明 |
 |------|------|--------|------|
-| `position` | Point | (bounding box 中心) | 中心点坐标，设置约束属性时由约束系统自动计算。未设置时默认为 `(size.width/2, size.height/2)`，使左上角对齐原点。推荐使用约束属性（`left`/`top`）进行定位 |
-| `size` | Size | 0,0 | 尺寸 "width,height" |
+| `position` | Point | (bounding box 中心) | 中心点坐标，可动画。设置约束属性时由约束系统自动计算。未设置时默认为 `(size.width/2, size.height/2)`，使左上角对齐原点。静态布局推荐使用约束属性 |
+| `size` | Size | 0,0 | 尺寸 "width,height"，可动画。静态布局建议使用 `width`/`height` 属性 |
 | `reversed` | bool | false | 反转路径方向 |
 
-椭圆支持所有约束属性（见 §4.1）。
+椭圆支持所有约束属性（见 §4.3）。
 
 **计算规则**：
 ```
@@ -1350,7 +1377,7 @@ y = position.y + outerRadius * sin(angle)
 
 #### 6.2.5 文本（Text）
 
-文本元素提供文本内容的几何形状。与形状元素产生单一 Path 不同，Text 经过塑形后会产生**字形列表**（多个字形）并累积到渲染上下文的几何列表中，供后续修改器变换或绘制器渲染。
+Text 是一种几何元素，向几何列表贡献字形（而非路径）。与形状元素产生单一 Path 不同，Text 经过塑形后会产生**字形列表**（多个字形）并累积到渲染上下文的几何列表中，供后续修改器变换或绘制器渲染。
 
 ```xml
 <Text text="Hello World" left="100" top="200" fontFamily="Arial" fontStyle="Regular" fauxBold="true" fauxItalic="false" fontSize="24" letterSpacing="0" textAnchor="start"/>
@@ -1880,8 +1907,6 @@ TextBox 是**仅参与预排版**的节点：它在渲染前的排版阶段被�
 
 | 属性 | 类型 | 默认值 | 说明 |
 |------|------|--------|------|
-| `width` | float | NaN | 排版宽度。NaN 表示该维度上无边界，可能导致 wordWrap 或 overflow 无效果 |
-| `height` | float | NaN | 排版高度。NaN 表示该维度上无边界，可能导致 wordWrap 或 overflow 无效果 |
 | `textAlign` | TextAlign | start | 文本对齐——沿行内方向对齐文本（见下方） |
 | `paragraphAlign` | ParagraphAlign | near | 段落对齐——沿块流方向对齐文本行/列（见下方） |
 | `writingMode` | WritingMode | horizontal | 排版方向（见下方） |
@@ -1889,7 +1914,7 @@ TextBox 是**仅参与预排版**的节点：它在渲染前的排版阶段被�
 | `wordWrap` | bool | true | 是否启用自动换行，在盒子宽度边界（横排）或高度边界（竖排）处换行。当该维度为 NaN 时无效果 |
 | `overflow` | Overflow | visible | 文本超出盒子高度（横排）或宽度（竖排）时的溢出行为。当该维度为 NaN 时无效果 |
 
-TextBox 继承 Group 的所有属性（`position`、`anchor`、`rotation`、`scale`、`skew`、`skewAxis`、`alpha`、`padding`）和约束属性（见 §4.1）。`padding` 属性内缩文本排版区域和非 Text 子元素的约束参考系。`position` 属性指定文本区域左上角在父坐标系中的坐标。推荐使用约束属性（`left`/`top`）进行定位——设置约束属性时，`position` 由约束系统自动计算。
+TextBox 继承 Group 的所有属性（`position`、`anchor`、`rotation`、`scale`、`skew`、`skewAxis`、`alpha`、`padding`）和约束属性（见 §4.3）。TextBox 的 `width`/`height` 默认为 NaN（无边界，自动尺寸）；NaN 表示该维度上无边界，可能导致 `wordWrap` 或 `overflow` 无效果。`padding` 属性内缩文本排版区域和非 Text 子元素的约束参考系。`position` 属性指定文本区域左上角在父坐标系中的坐标。推荐使用约束属性（`left`/`top`）进行定位——设置约束属性时，`position` 由约束系统自动计算。
 
 **TextAlign（文本对齐）**：
 
@@ -1984,7 +2009,7 @@ alpha = lerp(startAlpha, endAlpha, t)
 
 当 `copies` 为小数时（如 `3.5`），采用**叠加半透明**的方式实现部分副本效果：
 
-1. **几何复制**：形状和文本按 `ceil(copies)` 个复制（即 4 个），几何本身不做缩放或裁剪
+1. **几何复制**：形状和文本几何按 `ceil(copies)` 个复制（即 4 个），几何本身不做缩放或裁剪
 2. **透明度调整**：最后一个副本的透明度乘以小数部分（如 0.5），产生半透明效果
 3. **视觉效果**：通过透明度渐变模拟"部分存在"的副本
 
@@ -2019,11 +2044,9 @@ Group 是带变换属性的矢量元素容器。
 | `skew` | float | 0 | 倾斜量 |
 | `skewAxis` | float | 0 | 倾斜轴角度 |
 | `alpha` | float | 1 | 透明度 0~1 |
-| `width` | float | - | 布局宽度（见 §4） |
-| `height` | float | - | 布局高度（见 §4） |
 | `padding` | float 或 "t,r,b,l" | 0 | 内缩子元素的约束参考系。支持单值（四边均匀）、两值（垂直,水平）、四值（上,右,下,左） |
 
-Group 支持所有约束属性（见 §4.1）。
+Group 支持所有约束属性（见 §4.3）。
 
 #### 变换顺序
 
@@ -2067,21 +2090,15 @@ Group 创建独立的作用域，用于隔离几何累积和渲染：
 **示例 2 - 子 Group 几何向上累积**：
 > [Sample](samples/group_propagation.pagx)
 
-**示例 3 - 多个绘制器复用几何**：
-> [Sample](samples/multiple_painters.pagx)
-
 #### 多重填充与描边
 
 由于绘制器不清空几何列表，同一几何可连续应用多个 Fill 和 Stroke。
 
-**示例 4 - 多重填充**：
+**示例 1 - 多重填充**：
 > [Sample](samples/multiple_fills.pagx)
 
-**示例 5 - 多重描边**：
+**示例 2 - 多重描边**：
 > [Sample](samples/multiple_strokes.pagx)
-
-**示例 6 - 混合叠加**：
-> [Sample](samples/mixed_overlay.pagx)
 
 **渲染顺序**：多个绘制器按文档顺序渲染，先出现的位于下方。
 
@@ -2171,8 +2188,8 @@ Layer 的 `import` 属性引用要导入的外部文件。格式从文件扩展�
 | **颜色源** | `SolidColor`, `LinearGradient`, `RadialGradient`, `ConicGradient`, `DiamondGradient`, `ImagePattern`, `ColorStop` | 绘制器使用的颜色定义。 |
 | **图层样式** | `DropShadowStyle`, `InnerShadowStyle`, `BackgroundBlurStyle` | 应用于图层内容的视觉效果。 |
 | **图层滤镜** | `BlurFilter`, `DropShadowFilter`, `InnerShadowFilter`, `BlendFilter`, `ColorMatrixFilter` | 应用于合成图层的后期处理效果。 |
-| **几何元素** | `Rectangle`, `Ellipse`, `Polystar`, `Path`, `Text`, `GlyphRun` | 可绘制的形状和文本。必须在 Layer/Group 内。 |
-| **修改器** | `TrimPath`, `RoundCorner`, `MergePath`, `TextModifier`, `RangeSelector`, `TextPath`, `TextBox`, `Repeater` | 变换或组合几何图形和文本。 |
+| **几何元素** | `Rectangle`, `Ellipse`, `Polystar`, `Path`, `Text`, `GlyphRun` | 可绘制的几何（形状和文本）。必须在 Layer/Group 内。 |
+| **修改器** | `TrimPath`, `RoundCorner`, `MergePath`, `TextModifier`, `RangeSelector`, `TextPath`, `Repeater` | 变换或组合几何图形和文本。 |
 | **绘制器** | `Fill`, `Stroke` | 对几何图形应用颜色/渐变。必须在 Layer/Group 内。 |
 | **导入指令** | （内联 `<svg>`、`import` 属性） | 导入指令。Layer 的内联 `<svg>` 子元素和 `import`/`importFormat` 属性通过 `pagx resolve` 解析为原生 PAGX 节点。 |
 
@@ -2255,6 +2272,7 @@ Layer / Group
 | **TileMode** | `clamp`, `repeat`, `mirror`, `decal` |
 | **FilterMode** | `nearest`, `linear` |
 | **MipmapMode** | `none`, `nearest`, `linear` |
+| **ScaleMode** | `none`, `stretch`, `letterBox`, `zoom` |
 | **LayoutMode** | `none`, `horizontal`, `vertical` |
 | **Alignment** | `start`, `center`, `end`, `stretch` |
 | **Arrangement** | `start`, `center`, `end`, `spaceBetween`, `spaceEvenly`, `spaceAround` |

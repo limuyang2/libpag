@@ -17,7 +17,9 @@
 /////////////////////////////////////////////////////////////////////////////////////////////////
 
 #include "pagx/PAGXImporter.h"
+#include <cerrno>
 #include <climits>
+#include <cmath>
 #include <cstdlib>
 #include <cstring>
 #include <fstream>
@@ -25,9 +27,13 @@
 #include <vector>
 #include "base/utils/Log.h"
 #include "pagx/PAGXDefaults.h"
+#include "pagx/nodes/Animation.h"
+#include "pagx/nodes/AnimationObject.h"
+#include "pagx/nodes/AnimationTimeline.h"
 #include "pagx/nodes/BackgroundBlurStyle.h"
 #include "pagx/nodes/BlendFilter.h"
 #include "pagx/nodes/BlurFilter.h"
+#include "pagx/nodes/Channel.h"
 #include "pagx/nodes/ColorMatrixFilter.h"
 #include "pagx/nodes/Composition.h"
 #include "pagx/nodes/ConicGradient.h"
@@ -38,6 +44,7 @@
 #include "pagx/nodes/Fill.h"
 #include "pagx/nodes/Font.h"
 #include "pagx/nodes/GlyphRun.h"
+#include "pagx/nodes/Gradient.h"
 #include "pagx/nodes/Group.h"
 #include "pagx/nodes/Image.h"
 #include "pagx/nodes/ImagePattern.h"
@@ -45,6 +52,8 @@
 #include "pagx/nodes/InnerShadowStyle.h"
 #include "pagx/nodes/LinearGradient.h"
 #include "pagx/nodes/MergePath.h"
+#include "pagx/nodes/NoiseFilter.h"
+#include "pagx/nodes/NoiseStyle.h"
 #include "pagx/nodes/Path.h"
 #include "pagx/nodes/PathData.h"
 #include "pagx/nodes/Polystar.h"
@@ -91,6 +100,8 @@ static float GetFloatAttribute(const DOMNode* node, const std::string& name, flo
                                PAGXDocument* doc = nullptr);
 static int GetIntAttribute(const DOMNode* node, const std::string& name, int defaultValue = 0,
                            PAGXDocument* doc = nullptr);
+static int64_t GetInt64Attribute(const DOMNode* node, const std::string& name,
+                                 int64_t defaultValue = 0, PAGXDocument* doc = nullptr);
 static bool GetBoolAttribute(const DOMNode* node, const std::string& name,
                              bool defaultValue = false, PAGXDocument* doc = nullptr);
 static Point ParsePoint(const std::string& str, bool* outValid = nullptr);
@@ -126,10 +137,13 @@ static EnumType GetEnumAttribute(const DOMNode* node, const char* name,
 // Forward declarations for parse functions
 static void ParseDocument(const DOMNode* root, PAGXDocument* doc);
 static void ParseResources(const DOMNode* node, PAGXDocument* doc);
+static void ParseAnimations(const DOMNode* node, std::vector<Animation*>* animations,
+                            PAGXDocument* doc);
 static Layer* ParseLayer(const DOMNode* node, PAGXDocument* doc);
 static void ParseContents(const DOMNode* node, Layer* layer, PAGXDocument* doc);
 static void ParseStyles(const DOMNode* node, Layer* layer, PAGXDocument* doc);
 static void ParseFilters(const DOMNode* node, Layer* layer, PAGXDocument* doc);
+static void ParseLayerTimelines(const DOMNode* node, Layer* layer, PAGXDocument* doc);
 static Element* ParseElement(const DOMNode* node, PAGXDocument* doc);
 static ColorSource* ParseColorSource(const DOMNode* node, PAGXDocument* doc);
 static LayerStyle* ParseLayerStyle(const DOMNode* node, PAGXDocument* doc);
@@ -171,6 +185,8 @@ static DropShadowFilter* ParseDropShadowFilter(const DOMNode* node, PAGXDocument
 static InnerShadowFilter* ParseInnerShadowFilter(const DOMNode* node, PAGXDocument* doc);
 static BlendFilter* ParseBlendFilter(const DOMNode* node, PAGXDocument* doc);
 static ColorMatrixFilter* ParseColorMatrixFilter(const DOMNode* node, PAGXDocument* doc);
+static NoiseStyle* ParseNoiseStyle(const DOMNode* node, PAGXDocument* doc);
+static NoiseFilter* ParseNoiseFilter(const DOMNode* node, PAGXDocument* doc);
 
 //==============================================================================
 // Custom data parsing
@@ -327,6 +343,7 @@ static void ParseResources(const DOMNode* node, PAGXDocument* doc) {
     }
     child = child->nextSibling;
   }
+
   // Second pass: fully parse each resource. Pre-registered nodes are reused by makeNodeFromXML.
   child = node->firstChild;
   while (child) {
@@ -356,6 +373,53 @@ static float GetFloatAttributeOrNaN(const DOMNode* node, const std::string& name
   return value.has_value() ? *value : NAN;
 }
 
+// Parses a dimension attribute that may contain a percentage suffix (e.g. "100" or "50%") and
+// writes the result into the node's absolute and percent fields.
+// - When the value ends with "%": sets *outPercent to the numeric part and *outAbsolute to NaN.
+// - Otherwise: sets *outAbsolute to the numeric value and *outPercent to NaN.
+// Inputs forbidden by the XSD DimensionType pattern "[0-9]*\.?[0-9]+%?" (leading whitespace,
+// sign, hex prefix, non-finite, negative, whitespace around the "%") report an error and leave
+// both outputs as NaN. Absent attributes also leave both outputs as NaN but do not report.
+static void ReadDimension(const DOMNode* node, const std::string& name, float* outAbsolute,
+                          float* outPercent, PAGXDocument* doc) {
+  *outAbsolute = NAN;
+  *outPercent = NAN;
+  auto* str = node->findAttribute(name);
+  if (str == nullptr || str->empty()) {
+    return;
+  }
+  const char* cstr = str->c_str();
+  // Reject leading whitespace, sign, and hex prefix; strtof would otherwise accept them.
+  char first = cstr[0];
+  if (first == ' ' || first == '\t' || first == '+' || first == '-') {
+    ReportError(doc, node, "Invalid value '" + *str + "' for '" + name + "' attribute.");
+    return;
+  }
+  if (first == '0' && (cstr[1] == 'x' || cstr[1] == 'X')) {
+    ReportError(doc, node, "Invalid value '" + *str + "' for '" + name + "' attribute.");
+    return;
+  }
+  char* endPtr = nullptr;
+  float value = strtof(cstr, &endPtr);
+  if (endPtr == cstr || !std::isfinite(value) || value < 0) {
+    ReportError(doc, node, "Invalid value '" + *str + "' for '" + name + "' attribute.");
+    return;
+  }
+  if (*endPtr == '%') {
+    if (endPtr[1] != '\0') {
+      ReportError(doc, node, "Invalid value '" + *str + "' for '" + name + "' attribute.");
+      return;
+    }
+    *outPercent = value;
+    return;
+  }
+  if (*endPtr != '\0') {
+    ReportError(doc, node, "Invalid value '" + *str + "' for '" + name + "' attribute.");
+    return;
+  }
+  *outAbsolute = value;
+}
+
 static Padding GetPaddingAttribute(const DOMNode* node, PAGXDocument* doc) {
   auto& str = GetAttribute(node, "padding");
   if (str.empty()) {
@@ -380,8 +444,8 @@ static Layer* ParseLayer(const DOMNode* node, PAGXDocument* doc) {
   layer->blendMode = GET_ENUM(node, "blendMode", "normal", doc, BlendMode);
   layer->x = GetFloatAttribute(node, "x", Default<Layer>().x, doc);
   layer->y = GetFloatAttribute(node, "y", Default<Layer>().y, doc);
-  layer->width = GetFloatAttributeOrNaN(node, "width", doc);
-  layer->height = GetFloatAttributeOrNaN(node, "height", doc);
+  ReadDimension(node, "width", &layer->width, &layer->percentWidth, doc);
+  ReadDimension(node, "height", &layer->height, &layer->percentHeight, doc);
   layer->layout = GET_ENUM(node, "layout", "none", doc, LayoutMode);
   layer->gap = GetFloatAttribute(node, "gap", Default<Layer>().gap, doc);
   layer->flex = GetFloatAttribute(node, "flex", Default<Layer>().flex, doc);
@@ -441,7 +505,10 @@ static Layer* ParseLayer(const DOMNode* node, PAGXDocument* doc) {
       ReportError(doc, node,
                   "Resource '" + compositionAttr + "' not found for 'composition' attribute.");
     }
+  } else if (!compositionAttr.empty()) {
+    layer->compositionFilePath = compositionAttr;
   }
+  layer->timelines.clear();
 
   // Build directive attributes.
   layer->importDirective.source = GetAttribute(node, "import");
@@ -473,6 +540,10 @@ static Layer* ParseLayer(const DOMNode* node, PAGXDocument* doc) {
       if (childLayer) {
         layer->children.push_back(childLayer);
       }
+      continue;
+    }
+    if (current->name == "Timelines") {
+      ParseLayerTimelines(current.get(), layer, doc);
       continue;
     }
     if (current->name == "svg") {
@@ -511,9 +582,9 @@ static Layer* ParseLayer(const DOMNode* node, PAGXDocument* doc) {
                     " Expected: Layer, Group, Rectangle, Ellipse, Polystar,"
                     " Path, Text, Fill, Stroke, TrimPath, RoundCorner,"
                     " MergePath, TextModifier, TextPath, TextBox, Repeater,"
-                    " DropShadowStyle, InnerShadowStyle, BackgroundBlurStyle,"
+                    " DropShadowStyle, InnerShadowStyle, BackgroundBlurStyle, NoiseStyle,"
                     " BlurFilter, DropShadowFilter, InnerShadowFilter,"
-                    " BlendFilter, ColorMatrixFilter.");
+                    " BlendFilter, ColorMatrixFilter, NoiseFilter.");
   }
 
   return layer;
@@ -557,7 +628,7 @@ static void ParseStyles(const DOMNode* node, Layer* layer, PAGXDocument* doc) {
                   "Element '" + current->name +
                       "' is not allowed in 'styles'."
                       " Expected: DropShadowStyle, InnerShadowStyle,"
-                      " BackgroundBlurStyle.");
+                      " BackgroundBlurStyle, NoiseStyle.");
     }
   }
 }
@@ -578,7 +649,35 @@ static void ParseFilters(const DOMNode* node, Layer* layer, PAGXDocument* doc) {
                   "Element '" + current->name +
                       "' is not allowed in 'filters'."
                       " Expected: BlurFilter, DropShadowFilter,"
-                      " InnerShadowFilter, BlendFilter, ColorMatrixFilter.");
+                      " InnerShadowFilter, BlendFilter, ColorMatrixFilter, NoiseFilter.");
+    }
+  }
+}
+
+static void ParseLayerTimelines(const DOMNode* node, Layer* layer, PAGXDocument* doc) {
+  auto child = node->firstChild;
+  while (child) {
+    auto current = child;
+    child = child->nextSibling;
+    if (current->type != DOMNodeType::Element) {
+      continue;
+    }
+    if (current->name == "Animation") {
+      auto refAttr = GetAttribute(current.get(), "ref");
+      if (refAttr.empty() || refAttr[0] != '@') {
+        ReportError(doc, current.get(),
+                    "Timelines/Animation requires 'ref' attribute starting with '@'.");
+        continue;
+      }
+      auto driver = std::make_unique<AnimationTimeline>();
+      driver->animationId = refAttr.substr(1);
+      driver->playing = GetBoolAttribute(current.get(), "playing", true, doc);
+      layer->timelines.push_back(std::move(driver));
+    } else {
+      ReportError(doc, current.get(),
+                  "Element '" + current->name +
+                      "' is not allowed in 'Timelines'."
+                      " Expected: Animation.");
     }
   }
 }
@@ -664,6 +763,9 @@ static LayerStyle* ParseLayerStyle(const DOMNode* node, PAGXDocument* doc) {
   if (node->name == "BackgroundBlurStyle") {
     return ParseBackgroundBlurStyle(node, doc);
   }
+  if (node->name == "NoiseStyle") {
+    return ParseNoiseStyle(node, doc);
+  }
   return nullptr;
 }
 
@@ -683,6 +785,9 @@ static LayerFilter* ParseLayerFilter(const DOMNode* node, PAGXDocument* doc) {
   if (node->name == "ColorMatrixFilter") {
     return ParseColorMatrixFilter(node, doc);
   }
+  if (node->name == "NoiseFilter") {
+    return ParseNoiseFilter(node, doc);
+  }
   return nullptr;
 }
 
@@ -696,12 +801,7 @@ static Rectangle* ParseRectangle(const DOMNode* node, PAGXDocument* doc) {
     return nullptr;
   }
   rect->size = GetSizeAttribute(node, "size", {0, 0}, doc);
-  auto* posAttr = node->findAttribute("position");
-  if (posAttr && !posAttr->empty()) {
-    rect->position = GetPointAttribute(node, "position", Default<Rectangle>().position, doc);
-  } else {
-    rect->position = {rect->size.width * 0.5f, rect->size.height * 0.5f};
-  }
+  rect->position = GetPointAttribute(node, "position", Default<Rectangle>().position, doc);
   rect->roundness = GetFloatAttribute(node, "roundness", Default<Rectangle>().roundness, doc);
   rect->reversed = GetBoolAttribute(node, "reversed", Default<Rectangle>().reversed, doc);
   rect->left = GetFloatAttributeOrNaN(node, "left", doc);
@@ -710,6 +810,8 @@ static Rectangle* ParseRectangle(const DOMNode* node, PAGXDocument* doc) {
   rect->bottom = GetFloatAttributeOrNaN(node, "bottom", doc);
   rect->centerX = GetFloatAttributeOrNaN(node, "centerX", doc);
   rect->centerY = GetFloatAttributeOrNaN(node, "centerY", doc);
+  ReadDimension(node, "width", &rect->width, &rect->percentWidth, doc);
+  ReadDimension(node, "height", &rect->height, &rect->percentHeight, doc);
   return rect;
 }
 
@@ -719,12 +821,7 @@ static Ellipse* ParseEllipse(const DOMNode* node, PAGXDocument* doc) {
     return nullptr;
   }
   ellipse->size = GetSizeAttribute(node, "size", {0, 0}, doc);
-  auto* posAttr = node->findAttribute("position");
-  if (posAttr && !posAttr->empty()) {
-    ellipse->position = GetPointAttribute(node, "position", Default<Ellipse>().position, doc);
-  } else {
-    ellipse->position = {ellipse->size.width * 0.5f, ellipse->size.height * 0.5f};
-  }
+  ellipse->position = GetPointAttribute(node, "position", Default<Ellipse>().position, doc);
   ellipse->reversed = GetBoolAttribute(node, "reversed", Default<Ellipse>().reversed, doc);
   ellipse->left = GetFloatAttributeOrNaN(node, "left", doc);
   ellipse->right = GetFloatAttributeOrNaN(node, "right", doc);
@@ -732,6 +829,8 @@ static Ellipse* ParseEllipse(const DOMNode* node, PAGXDocument* doc) {
   ellipse->bottom = GetFloatAttributeOrNaN(node, "bottom", doc);
   ellipse->centerX = GetFloatAttributeOrNaN(node, "centerX", doc);
   ellipse->centerY = GetFloatAttributeOrNaN(node, "centerY", doc);
+  ReadDimension(node, "width", &ellipse->width, &ellipse->percentWidth, doc);
+  ReadDimension(node, "height", &ellipse->height, &ellipse->percentHeight, doc);
   return ellipse;
 }
 
@@ -752,19 +851,15 @@ static Polystar* ParsePolystar(const DOMNode* node, PAGXDocument* doc) {
   polystar->innerRoundness =
       GetFloatAttribute(node, "innerRoundness", Default<Polystar>().innerRoundness, doc);
   polystar->reversed = GetBoolAttribute(node, "reversed", Default<Polystar>().reversed, doc);
-  auto* posAttr = node->findAttribute("position");
-  if (posAttr && !posAttr->empty()) {
-    polystar->position = GetPointAttribute(node, "position", Default<Polystar>().position, doc);
-  } else {
-    auto bounds = polystar->getContentBounds();
-    polystar->position = {-bounds.x, -bounds.y};
-  }
+  polystar->position = GetPointAttribute(node, "position", Default<Polystar>().position, doc);
   polystar->left = GetFloatAttributeOrNaN(node, "left", doc);
   polystar->right = GetFloatAttributeOrNaN(node, "right", doc);
   polystar->top = GetFloatAttributeOrNaN(node, "top", doc);
   polystar->bottom = GetFloatAttributeOrNaN(node, "bottom", doc);
   polystar->centerX = GetFloatAttributeOrNaN(node, "centerX", doc);
   polystar->centerY = GetFloatAttributeOrNaN(node, "centerY", doc);
+  ReadDimension(node, "width", &polystar->width, &polystar->percentWidth, doc);
+  ReadDimension(node, "height", &polystar->height, &polystar->percentHeight, doc);
   return polystar;
 }
 
@@ -796,6 +891,8 @@ static Path* ParsePath(const DOMNode* node, PAGXDocument* doc) {
   path->bottom = GetFloatAttributeOrNaN(node, "bottom", doc);
   path->centerX = GetFloatAttributeOrNaN(node, "centerX", doc);
   path->centerY = GetFloatAttributeOrNaN(node, "centerY", doc);
+  ReadDimension(node, "width", &path->width, &path->percentWidth, doc);
+  ReadDimension(node, "height", &path->height, &path->percentHeight, doc);
   return path;
 }
 
@@ -852,6 +949,8 @@ static Text* ParseText(const DOMNode* node, PAGXDocument* doc) {
   text->bottom = GetFloatAttributeOrNaN(node, "bottom", doc);
   text->centerX = GetFloatAttributeOrNaN(node, "centerX", doc);
   text->centerY = GetFloatAttributeOrNaN(node, "centerY", doc);
+  ReadDimension(node, "width", &text->width, &text->percentWidth, doc);
+  ReadDimension(node, "height", &text->height, &text->percentHeight, doc);
   return text;
 }
 
@@ -902,15 +1001,19 @@ static Fill* ParseFill(const DOMNode* node, PAGXDocument* doc) {
   if (!fill) {
     return nullptr;
   }
-  fill->color = ParseColorAttr(GetAttribute(node, "color"), doc, node);
+  // Child ColorSource takes precedence over the color attribute. Parse the child first so the
+  // attribute-built SolidColor is not created and orphaned in the document's node list when a
+  // child is present.
+  auto childColor = ParseChildColorSource(node, doc);
+  if (childColor) {
+    fill->color = childColor;
+  } else {
+    fill->color = ParseColorAttr(GetAttribute(node, "color"), doc, node);
+  }
   fill->alpha = GetFloatAttribute(node, "alpha", Default<Fill>().alpha, doc);
   fill->blendMode = GET_ENUM(node, "blendMode", "normal", doc, BlendMode);
   fill->fillRule = GET_ENUM(node, "fillRule", "winding", doc, FillRule);
   fill->placement = GET_ENUM(node, "placement", "background", doc, LayerPlacement);
-  auto childColor = ParseChildColorSource(node, doc);
-  if (childColor) {
-    fill->color = childColor;
-  }
   return fill;
 }
 
@@ -919,7 +1022,15 @@ static Stroke* ParseStroke(const DOMNode* node, PAGXDocument* doc) {
   if (!stroke) {
     return nullptr;
   }
-  stroke->color = ParseColorAttr(GetAttribute(node, "color"), doc, node);
+  // Child ColorSource takes precedence over the color attribute. Parse the child first so the
+  // attribute-built SolidColor is not created and orphaned in the document's node list when a
+  // child is present.
+  auto childColor = ParseChildColorSource(node, doc);
+  if (childColor) {
+    stroke->color = childColor;
+  } else {
+    stroke->color = ParseColorAttr(GetAttribute(node, "color"), doc, node);
+  }
   stroke->width = GetFloatAttribute(node, "width", Default<Stroke>().width, doc);
   stroke->alpha = GetFloatAttribute(node, "alpha", Default<Stroke>().alpha, doc);
   stroke->blendMode = GET_ENUM(node, "blendMode", "normal", doc, BlendMode);
@@ -935,10 +1046,6 @@ static Stroke* ParseStroke(const DOMNode* node, PAGXDocument* doc) {
       GetBoolAttribute(node, "dashAdaptive", Default<Stroke>().dashAdaptive, doc);
   stroke->align = GET_ENUM(node, "align", "center", doc, StrokeAlign);
   stroke->placement = GET_ENUM(node, "placement", "background", doc, LayerPlacement);
-  auto childColor = ParseChildColorSource(node, doc);
-  if (childColor) {
-    stroke->color = childColor;
-  }
   return stroke;
 }
 
@@ -1060,6 +1167,8 @@ static TextPath* ParseTextPath(const DOMNode* node, PAGXDocument* doc) {
   textPath->bottom = GetFloatAttributeOrNaN(node, "bottom", doc);
   textPath->centerX = GetFloatAttributeOrNaN(node, "centerX", doc);
   textPath->centerY = GetFloatAttributeOrNaN(node, "centerY", doc);
+  ReadDimension(node, "width", &textPath->width, &textPath->percentWidth, doc);
+  ReadDimension(node, "height", &textPath->height, &textPath->percentHeight, doc);
   return textPath;
 }
 
@@ -1076,8 +1185,8 @@ static TextBox* ParseTextBox(const DOMNode* node, PAGXDocument* doc) {
   textBox->skew = GetFloatAttribute(node, "skew", Default<TextBox>().skew, doc);
   textBox->skewAxis = GetFloatAttribute(node, "skewAxis", Default<TextBox>().skewAxis, doc);
   textBox->alpha = GetFloatAttribute(node, "alpha", Default<TextBox>().alpha, doc);
-  textBox->width = GetFloatAttributeOrNaN(node, "width", doc);
-  textBox->height = GetFloatAttributeOrNaN(node, "height", doc);
+  ReadDimension(node, "width", &textBox->width, &textBox->percentWidth, doc);
+  ReadDimension(node, "height", &textBox->height, &textBox->percentHeight, doc);
   textBox->padding = GetPaddingAttribute(node, doc);
   // TextBox typography properties
   textBox->textAlign = GET_ENUM(node, "textAlign", "start", doc, TextAlign);
@@ -1144,8 +1253,8 @@ static Group* ParseGroup(const DOMNode* node, PAGXDocument* doc) {
   group->skew = GetFloatAttribute(node, "skew", Default<Group>().skew, doc);
   group->skewAxis = GetFloatAttribute(node, "skewAxis", Default<Group>().skewAxis, doc);
   group->alpha = GetFloatAttribute(node, "alpha", Default<Group>().alpha, doc);
-  group->width = GetFloatAttributeOrNaN(node, "width", doc);
-  group->height = GetFloatAttributeOrNaN(node, "height", doc);
+  ReadDimension(node, "width", &group->width, &group->percentWidth, doc);
+  ReadDimension(node, "height", &group->height, &group->percentHeight, doc);
   group->padding = GetPaddingAttribute(node, doc);
   group->left = GetFloatAttributeOrNaN(node, "left", doc);
   group->right = GetFloatAttributeOrNaN(node, "right", doc);
@@ -1220,22 +1329,23 @@ static SolidColor* ParseSolidColor(const DOMNode* node, PAGXDocument* doc) {
   return solid;
 }
 
-static void ParseGradientCommon(const DOMNode* node, PAGXDocument* doc, Matrix& matrix,
-                                std::vector<ColorStop*>& colorStops) {
+static void ParseGradientCommon(const DOMNode* node, PAGXDocument* doc, Gradient* gradient) {
   auto matrixStr = GetAttribute(node, "matrix");
   if (!matrixStr.empty()) {
     if (ParseFloatList(matrixStr).size() < 6) {
       ReportError(doc, node, "Invalid value '" + matrixStr + "' for 'matrix' attribute.");
     } else {
-      matrix = MatrixFromString(matrixStr);
+      gradient->matrix = MatrixFromString(matrixStr);
     }
   }
+  gradient->fitsToGeometry =
+      GetBoolAttribute(node, "fitsToGeometry", Default<LinearGradient>().fitsToGeometry, doc);
   auto child = node->firstChild;
   while (child) {
     if (child->type == DOMNodeType::Element && child->name == "ColorStop") {
       auto stop = ParseColorStop(child.get(), doc);
       if (stop) {
-        colorStops.push_back(stop);
+        gradient->colorStops.push_back(stop);
       }
     } else if (child->type == DOMNodeType::Element) {
       ReportError(doc, child.get(),
@@ -1254,7 +1364,7 @@ static LinearGradient* ParseLinearGradient(const DOMNode* node, PAGXDocument* do
   gradient->startPoint =
       GetPointAttribute(node, "startPoint", Default<LinearGradient>().startPoint, doc);
   gradient->endPoint = GetPointAttribute(node, "endPoint", Default<LinearGradient>().endPoint, doc);
-  ParseGradientCommon(node, doc, gradient->matrix, gradient->colorStops);
+  ParseGradientCommon(node, doc, gradient);
   return gradient;
 }
 
@@ -1265,7 +1375,7 @@ static RadialGradient* ParseRadialGradient(const DOMNode* node, PAGXDocument* do
   }
   gradient->center = GetPointAttribute(node, "center", Default<RadialGradient>().center, doc);
   gradient->radius = GetFloatAttribute(node, "radius", Default<RadialGradient>().radius, doc);
-  ParseGradientCommon(node, doc, gradient->matrix, gradient->colorStops);
+  ParseGradientCommon(node, doc, gradient);
   return gradient;
 }
 
@@ -1278,7 +1388,7 @@ static ConicGradient* ParseConicGradient(const DOMNode* node, PAGXDocument* doc)
   gradient->startAngle =
       GetFloatAttribute(node, "startAngle", Default<ConicGradient>().startAngle, doc);
   gradient->endAngle = GetFloatAttribute(node, "endAngle", Default<ConicGradient>().endAngle, doc);
-  ParseGradientCommon(node, doc, gradient->matrix, gradient->colorStops);
+  ParseGradientCommon(node, doc, gradient);
   return gradient;
 }
 
@@ -1289,7 +1399,7 @@ static DiamondGradient* ParseDiamondGradient(const DOMNode* node, PAGXDocument* 
   }
   gradient->center = GetPointAttribute(node, "center", Default<DiamondGradient>().center, doc);
   gradient->radius = GetFloatAttribute(node, "radius", Default<DiamondGradient>().radius, doc);
-  ParseGradientCommon(node, doc, gradient->matrix, gradient->colorStops);
+  ParseGradientCommon(node, doc, gradient);
   return gradient;
 }
 
@@ -1316,10 +1426,11 @@ static ImagePattern* ParseImagePattern(const DOMNode* node, PAGXDocument* doc) {
       }
     }
   }
-  pattern->tileModeX = GET_ENUM(node, "tileModeX", "clamp", doc, TileMode);
-  pattern->tileModeY = GET_ENUM(node, "tileModeY", "clamp", doc, TileMode);
+  pattern->tileModeX = GET_ENUM(node, "tileModeX", "decal", doc, TileMode);
+  pattern->tileModeY = GET_ENUM(node, "tileModeY", "decal", doc, TileMode);
   pattern->filterMode = GET_ENUM(node, "filterMode", "linear", doc, FilterMode);
   pattern->mipmapMode = GET_ENUM(node, "mipmapMode", "linear", doc, MipmapMode);
+  pattern->scaleMode = GET_ENUM(node, "scaleMode", "letterBox", doc, ScaleMode);
   auto matrixStr = GetAttribute(node, "matrix");
   if (!matrixStr.empty()) {
     if (ParseFloatList(matrixStr).size() < 6) {
@@ -1387,15 +1498,351 @@ static Composition* ParseComposition(const DOMNode* node, PAGXDocument* doc) {
         if (layer) {
           comp->layers.push_back(layer);
         }
+      } else if (child->name == "Animations") {
+        ParseAnimations(child.get(), &comp->animations, doc);
       } else {
-        ReportError(
-            doc, child.get(),
-            "Element '" + child->name + "' is not allowed in 'Composition'. Expected: Layer.");
+        ReportError(doc, child.get(),
+                    "Element '" + child->name +
+                        "' is not allowed in 'Composition'. Expected: Layer, Animations.");
       }
     }
     child = child->nextSibling;
   }
   return comp;
+}
+
+static KeyframeInterpolationType ParseKeyframeInterpolation(const std::string& value,
+                                                            PAGXDocument* doc,
+                                                            const DOMNode* node) {
+  if (value.empty() || value == "linear") {
+    return KeyframeInterpolationType::Linear;
+  }
+  if (value == "none") {
+    return KeyframeInterpolationType::None;
+  }
+  if (value == "bezier") {
+    return KeyframeInterpolationType::Bezier;
+  }
+  if (value == "hold") {
+    return KeyframeInterpolationType::Hold;
+  }
+  ReportError(doc, node, "Invalid interpolation value '" + value + "'.");
+  return KeyframeInterpolationType::Linear;
+}
+
+static bool LooksLikeInteger(const std::string& value) {
+  if (value.empty()) {
+    return false;
+  }
+  size_t i = value[0] == '-' ? 1 : 0;
+  if (i == value.size()) {
+    return false;
+  }
+  for (; i < value.size(); ++i) {
+    if (value[i] < '0' || value[i] > '9') {
+      return false;
+    }
+  }
+  return true;
+}
+
+static bool LooksLikeFloat(const std::string& value) {
+  if (value.empty()) {
+    return false;
+  }
+  char* end = nullptr;
+  float f = strtof(value.c_str(), &end);
+  if (end != value.c_str() && *end == '\0') {
+    return std::isfinite(f);
+  }
+  return false;
+}
+
+// Parses a keyframe value string into the typed representation T. Numeric, bool and color
+// specializations are strict: any malformed or out-of-range input is reported via ReportError and
+// falls back to a zero/default value, so a typo never silently produces a misleading animation.
+// std::string and ImageRef are intentionally lenient pass-throughs because every string is a valid
+// payload for them (ImageRef only strips an optional leading '@' reference marker). The unspecialized
+// primary template is unreachable for supported attribute types and merely returns a default-constructed T.
+template <typename T>
+static T ParseTypedValue(const std::string&, PAGXDocument*, const DOMNode*) {
+  return T{};
+}
+
+template <>
+float ParseTypedValue<float>(const std::string& value, PAGXDocument* doc, const DOMNode* node) {
+  char* endPtr = nullptr;
+  float result = strtof(value.c_str(), &endPtr);
+  if (endPtr == value.c_str() || *endPtr != '\0' || !std::isfinite(result)) {
+    ReportError(doc, node, "Invalid float keyframe value '" + value + "'.");
+    return 0.0f;
+  }
+  return result;
+}
+
+template <>
+bool ParseTypedValue<bool>(const std::string& value, PAGXDocument* doc, const DOMNode* node) {
+  if (value == "true" || value == "1") {
+    return true;
+  }
+  if (value == "false" || value == "0") {
+    return false;
+  }
+  ReportError(doc, node, "Invalid bool keyframe value '" + value + "'.");
+  return false;
+}
+
+template <>
+int ParseTypedValue<int>(const std::string& value, PAGXDocument* doc, const DOMNode* node) {
+  char* endPtr = nullptr;
+  long result = std::strtol(value.c_str(), &endPtr, 10);
+  if (endPtr == value.c_str() || *endPtr != '\0') {
+    ReportError(doc, node, "Invalid int keyframe value '" + value + "'.");
+    return 0;
+  }
+  if (result < INT_MIN || result > INT_MAX) {
+    ReportError(doc, node, "Int keyframe value '" + value + "' out of range.");
+    return 0;
+  }
+  return static_cast<int>(result);
+}
+
+template <>
+std::string ParseTypedValue<std::string>(const std::string& value, PAGXDocument*, const DOMNode*) {
+  return value;
+}
+
+template <>
+ImageRef ParseTypedValue<ImageRef>(const std::string& value, PAGXDocument*, const DOMNode*) {
+  ImageRef ref = {};
+  ref.id = !value.empty() && value[0] == '@' ? value.substr(1) : value;
+  return ref;
+}
+
+template <>
+Color ParseTypedValue<Color>(const std::string& value, PAGXDocument* doc, const DOMNode* node) {
+  bool valid = false;
+  auto color = ParseColor(value, &valid);
+  if (!valid) {
+    ReportError(doc, node, "Invalid color keyframe value '" + value + "'.");
+  }
+  return color;
+}
+
+template <>
+Matrix ParseTypedValue<Matrix>(const std::string& value, PAGXDocument*, const DOMNode*) {
+  // MatrixFromString accepts the same "a,b,c,d,tx,ty" form used for the matrix attribute; an
+  // unparseable value yields the identity matrix.
+  return MatrixFromString(value);
+}
+
+template <typename T>
+static void ParseKeyframes(const DOMNode* channelNode, TypedChannel<T>* channel,
+                           PAGXDocument* doc) {
+  auto child = channelNode->firstChild;
+  while (child) {
+    if (child->type == DOMNodeType::Element) {
+      if (child->name == "Key") {
+        Keyframe<T> key = {};
+        key.time = GetInt64Attribute(child.get(), "time", 0, doc);
+        key.value = ParseTypedValue<T>(GetAttribute(child.get(), "value"), doc, child.get());
+        key.interpolation = ParseKeyframeInterpolation(GetAttribute(child.get(), "interpolation"),
+                                                       doc, child.get());
+        auto bezierOut = GetAttribute(child.get(), "bezier-out");
+        if (!bezierOut.empty()) {
+          bool valid = false;
+          key.bezierOut = ParsePoint(bezierOut, &valid);
+          if (!valid) {
+            ReportError(doc, child.get(), "Invalid bezier-out value '" + bezierOut + "'.");
+          }
+        }
+        auto bezierIn = GetAttribute(child.get(), "bezier-in");
+        if (!bezierIn.empty()) {
+          bool valid = false;
+          key.bezierIn = ParsePoint(bezierIn, &valid);
+          if (!valid) {
+            ReportError(doc, child.get(), "Invalid bezier-in value '" + bezierIn + "'.");
+          }
+        }
+        channel->keyframes.push_back(key);
+      } else {
+        ReportError(doc, child.get(),
+                    "Element '" + child->name + "' is not allowed in 'Channel'. Expected: Key.");
+      }
+    }
+    child = child->nextSibling;
+  }
+}
+
+static Channel* ParseChannel(const DOMNode* node, PAGXDocument* doc) {
+  auto type = GetAttribute(node, "type");
+  auto firstValue = EmptyString();
+  auto child = node->firstChild;
+  while (child) {
+    if (child->type == DOMNodeType::Element && child->name == "Key") {
+      firstValue = GetAttribute(child.get(), "value");
+      break;
+    }
+    child = child->nextSibling;
+  }
+  if (type.empty()) {
+    // Infer the channel type from the first keyframe value when no explicit type is given. Probes
+    // run most-specific to least-specific so a value that is valid for several types resolves to
+    // the narrowest interpretation: color (#RGB / named) is checked before bool/int because some
+    // color tokens could otherwise be misread; bool ("true"/"false") before image; image ("@id")
+    // before the numeric probes; integer before float (every integer also parses as a float); and
+    // string is the final catch-all that always succeeds.
+    bool colorValid = false;
+    if (!firstValue.empty()) {
+      ParseColor(firstValue, &colorValid);
+    }
+    if (colorValid) {
+      type = "color";
+    } else if (firstValue == "true" || firstValue == "false") {
+      type = "bool";
+    } else if (!firstValue.empty() && firstValue[0] == '@') {
+      type = "image";
+    } else if (LooksLikeInteger(firstValue)) {
+      type = "int";
+    } else if (LooksLikeFloat(firstValue)) {
+      type = "float";
+    } else {
+      type = "string";
+    }
+  }
+
+  Channel* result = nullptr;
+  if (type == "float" || type == "number") {
+    auto ch = makeNodeFromXML<TypedChannel<float>>(node, doc);
+    ParseKeyframes(node, ch, doc);
+    result = ch;
+  } else if (type == "bool") {
+    auto ch = makeNodeFromXML<TypedChannel<bool>>(node, doc);
+    ParseKeyframes(node, ch, doc);
+    result = ch;
+  } else if (type == "int" || type == "enum") {
+    auto ch = makeNodeFromXML<TypedChannel<int>>(node, doc);
+    ParseKeyframes(node, ch, doc);
+    result = ch;
+  } else if (type == "string" || type == "text") {
+    auto ch = makeNodeFromXML<TypedChannel<std::string>>(node, doc);
+    ParseKeyframes(node, ch, doc);
+    result = ch;
+  } else if (type == "image" || type == "imageRef") {
+    auto ch = makeNodeFromXML<TypedChannel<ImageRef>>(node, doc);
+    ParseKeyframes(node, ch, doc);
+    result = ch;
+  } else if (type == "color") {
+    auto ch = makeNodeFromXML<TypedChannel<Color>>(node, doc);
+    ParseKeyframes(node, ch, doc);
+    result = ch;
+  } else if (type == "matrix") {
+    auto ch = makeNodeFromXML<TypedChannel<Matrix>>(node, doc);
+    ParseKeyframes(node, ch, doc);
+    result = ch;
+  } else {
+    ReportError(doc, node, "Invalid Channel type '" + type + "'.");
+  }
+
+  if (result != nullptr) {
+    result->name = GetAttribute(node, "name");
+    if (result->name.empty()) {
+      ReportError(doc, node, "Channel requires a non-empty 'name' attribute.");
+    }
+  }
+  return result;
+}
+
+static AnimationObject* ParseAnimationObject(const DOMNode* node, PAGXDocument* doc) {
+  auto object = makeNodeFromXML<AnimationObject>(node, doc);
+  if (!object) {
+    return nullptr;
+  }
+  object->target = GetAttribute(node, "target");
+  if (object->target.empty()) {
+    ReportError(doc, node, "Object requires a non-empty 'target' attribute.");
+  } else {
+    // ColorMatrixFilter exposes only a full 20-element matrix with no animatable scalar channel,
+    // so the runtime cannot apply per-channel keyframes to it. Reject the animation explicitly
+    // instead of silently ignoring it at runtime.
+    auto* targetNode = doc->findNode(object->target);
+    if (targetNode != nullptr && targetNode->nodeType() == NodeType::ColorMatrixFilter) {
+      ReportError(doc, node,
+                  "Animating a ColorMatrixFilter is not supported; it has no animatable channel.");
+    }
+  }
+  auto child = node->firstChild;
+  while (child) {
+    if (child->type == DOMNodeType::Element) {
+      if (child->name == "Channel") {
+        auto ch = ParseChannel(child.get(), doc);
+        if (ch != nullptr) {
+          object->channels.push_back(ch);
+        }
+      } else {
+        ReportError(doc, child.get(),
+                    "Element '" + child->name + "' is not allowed in 'Object'. Expected: Channel.");
+      }
+    }
+    child = child->nextSibling;
+  }
+  return object;
+}
+
+static Animation* ParseAnimation(const DOMNode* node, PAGXDocument* doc) {
+  auto animation = makeNodeFromXML<Animation>(node, doc);
+  if (!animation) {
+    return nullptr;
+  }
+  animation->duration = GetInt64Attribute(node, "duration", 0, doc);
+  animation->frameRate = GetFloatAttribute(node, "frameRate", 60.0f, doc);
+  auto loop = GetAttribute(node, "loop", "once");
+  if (loop == "once") {
+    animation->loop = LoopMode::Once;
+  } else if (loop == "loop") {
+    animation->loop = LoopMode::Loop;
+  } else if (loop == "pingPong") {
+    animation->loop = LoopMode::PingPong;
+  } else {
+    ReportError(doc, node, "Invalid Animation loop value '" + loop + "'.");
+  }
+  auto child = node->firstChild;
+  while (child) {
+    if (child->type == DOMNodeType::Element) {
+      if (child->name == "Object") {
+        auto object = ParseAnimationObject(child.get(), doc);
+        if (object != nullptr) {
+          animation->objects.push_back(object);
+        }
+      } else {
+        ReportError(
+            doc, child.get(),
+            "Element '" + child->name + "' is not allowed in 'Animation'. Expected: Object.");
+      }
+    }
+    child = child->nextSibling;
+  }
+  return animation;
+}
+
+static void ParseAnimations(const DOMNode* node, std::vector<Animation*>* animations,
+                            PAGXDocument* doc) {
+  auto child = node->firstChild;
+  while (child) {
+    if (child->type == DOMNodeType::Element) {
+      if (child->name == "Animation") {
+        auto animation = ParseAnimation(child.get(), doc);
+        if (animation != nullptr) {
+          animations->push_back(animation);
+        }
+      } else {
+        ReportError(
+            doc, child.get(),
+            "Element '" + child->name + "' is not allowed in 'Animations'. Expected: Animation.");
+      }
+    }
+    child = child->nextSibling;
+  }
 }
 
 static Font* ParseFont(const DOMNode* node, PAGXDocument* doc) {
@@ -1614,6 +2061,34 @@ static void ParseShadowAttributes(const DOMNode* node, PAGXDocument* doc, float&
   }
 }
 
+static NoiseStyle* ParseNoiseStyle(const DOMNode* node, PAGXDocument* doc) {
+  auto style = makeNodeFromXML<NoiseStyle>(node, doc);
+  if (!style) {
+    return nullptr;
+  }
+  style->blendMode = GET_ENUM(node, "blendMode", "normal", doc, BlendMode);
+  style->excludeChildEffects =
+      GetBoolAttribute(node, "excludeChildEffects", Default<NoiseStyle>().excludeChildEffects, doc);
+  style->mode = GET_ENUM(node, "mode", "mono", doc, NoiseMode);
+  style->size = GetFloatAttribute(node, "size", Default<NoiseStyle>().size, doc);
+  style->density = GetFloatAttribute(node, "density", Default<NoiseStyle>().density, doc);
+  style->seed = GetFloatAttribute(node, "seed", Default<NoiseStyle>().seed, doc);
+  auto colorStr = GetAttribute(node, "color");
+  if (!colorStr.empty()) {
+    style->color = GetColorAttribute(node, "color", doc);
+  }
+  auto firstColorStr = GetAttribute(node, "firstColor");
+  if (!firstColorStr.empty()) {
+    style->firstColor = GetColorAttribute(node, "firstColor", doc);
+  }
+  auto secondColorStr = GetAttribute(node, "secondColor");
+  if (!secondColorStr.empty()) {
+    style->secondColor = GetColorAttribute(node, "secondColor", doc);
+  }
+  style->opacity = GetFloatAttribute(node, "opacity", Default<NoiseStyle>().opacity, doc);
+  return style;
+}
+
 static DropShadowStyle* ParseDropShadowStyle(const DOMNode* node, PAGXDocument* doc) {
   auto style = makeNodeFromXML<DropShadowStyle>(node, doc);
   if (!style) {
@@ -1659,6 +2134,32 @@ static BackgroundBlurStyle* ParseBackgroundBlurStyle(const DOMNode* node, PAGXDo
 //==============================================================================
 // Layer filter parsing
 //==============================================================================
+
+static NoiseFilter* ParseNoiseFilter(const DOMNode* node, PAGXDocument* doc) {
+  auto filter = makeNodeFromXML<NoiseFilter>(node, doc);
+  if (!filter) {
+    return nullptr;
+  }
+  filter->mode = GET_ENUM(node, "mode", "mono", doc, NoiseMode);
+  filter->size = GetFloatAttribute(node, "size", Default<NoiseFilter>().size, doc);
+  filter->density = GetFloatAttribute(node, "density", Default<NoiseFilter>().density, doc);
+  filter->seed = GetFloatAttribute(node, "seed", Default<NoiseFilter>().seed, doc);
+  filter->blendMode = GET_ENUM(node, "blendMode", "normal", doc, BlendMode);
+  auto colorStr = GetAttribute(node, "color");
+  if (!colorStr.empty()) {
+    filter->color = GetColorAttribute(node, "color", doc);
+  }
+  auto firstColorStr = GetAttribute(node, "firstColor");
+  if (!firstColorStr.empty()) {
+    filter->firstColor = GetColorAttribute(node, "firstColor", doc);
+  }
+  auto secondColorStr = GetAttribute(node, "secondColor");
+  if (!secondColorStr.empty()) {
+    filter->secondColor = GetColorAttribute(node, "secondColor", doc);
+  }
+  filter->opacity = GetFloatAttribute(node, "opacity", Default<NoiseFilter>().opacity, doc);
+  return filter;
+}
 
 static BlurFilter* ParseBlurFilter(const DOMNode* node, PAGXDocument* doc) {
   auto filter = makeNodeFromXML<BlurFilter>(node, doc);
@@ -1774,6 +2275,30 @@ static int GetIntAttribute(const DOMNode* node, const std::string& name, int def
     return defaultValue;
   }
   return static_cast<int>(value);
+}
+
+static int64_t GetInt64Attribute(const DOMNode* node, const std::string& name, int64_t defaultValue,
+                                 PAGXDocument* doc) {
+  auto* str = node->findAttribute(name);
+  if (!str || str->empty()) {
+    return defaultValue;
+  }
+  char* endPtr = nullptr;
+  errno = 0;
+  int64_t value = strtoll(str->c_str(), &endPtr, 10);
+  if (endPtr == str->c_str() || *endPtr != '\0') {
+    if (doc) {
+      ReportError(doc, node, "Invalid value '" + *str + "' for '" + name + "' attribute.");
+    }
+    return defaultValue;
+  }
+  if (errno == ERANGE) {
+    if (doc) {
+      ReportError(doc, node, "Value out of range for '" + name + "' attribute.");
+    }
+    return defaultValue;
+  }
+  return value;
 }
 
 static bool GetBoolAttribute(const DOMNode* node, const std::string& name, bool defaultValue,
@@ -2142,10 +2667,12 @@ static void ParseDocument(const DOMNode* root, PAGXDocument* doc) {
         if (layer) {
           doc->layers.push_back(layer);
         }
+      } else if (child->name == "Animations") {
+        ParseAnimations(child.get(), &doc->animations, doc);
       } else if (child->name != "Resources") {
-        ReportError(
-            doc, child.get(),
-            "Element '" + child->name + "' is not allowed in 'pagx'. Expected: Resources, Layer.");
+        ReportError(doc, child.get(),
+                    "Element '" + child->name +
+                        "' is not allowed in 'pagx'. Expected: Resources, Layer, Animations.");
       }
     }
     child = child->nextSibling;

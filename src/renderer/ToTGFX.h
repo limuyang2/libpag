@@ -19,6 +19,7 @@
 #pragma once
 
 #include <memory>
+#include "pagx/PAGDisplayOptions.h"
 #include "pagx/nodes/PathData.h"
 #include "pagx/types/BlendMode.h"
 #include "pagx/types/Color.h"
@@ -34,6 +35,7 @@
 #include "pagx/types/Point.h"
 #include "pagx/types/Rect.h"
 #include "pagx/types/RepeaterOrder.h"
+#include "pagx/types/ScaleMode.h"
 #include "pagx/types/SelectorTypes.h"
 #include "pagx/types/StrokeStyle.h"
 #include "pagx/types/TileMode.h"
@@ -55,10 +57,13 @@ enum class LayerPlacement;
 enum class StrokeAlign;
 enum class MergePathOp;
 enum class LayerMaskType;
+enum class RenderMode;
+enum class TileUpdateMode;
 enum class RepeaterOrder;
 enum class SelectorUnit;
 enum class SelectorShape;
 enum class SelectorMode;
+enum class ScaleMode;
 }  // namespace tgfx
 
 namespace pagx {
@@ -70,6 +75,8 @@ tgfx::Color ToTGFX(const Color& color);
 tgfx::Matrix ToTGFX(const Matrix& matrix);
 
 tgfx::Rect ToTGFX(const Rect& rect);
+
+Rect FromTGFX(const tgfx::Rect& rect);
 
 tgfx::Path ToTGFX(const PathData& pathData);
 
@@ -102,6 +109,12 @@ tgfx::TileMode ToTGFX(TileMode mode);
 tgfx::FilterMode ToTGFX(FilterMode mode);
 
 tgfx::MipmapMode ToTGFX(MipmapMode mode);
+
+tgfx::ScaleMode ToTGFX(ScaleMode mode);
+
+tgfx::RenderMode ToTGFX(PAGRenderMode renderMode);
+
+tgfx::TileUpdateMode ToTGFX(PAGTileUpdateMode mode);
 
 tgfx::Matrix3D ToTGFX3D(const Matrix3D& matrix3D);
 

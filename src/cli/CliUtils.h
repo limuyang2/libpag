@@ -28,6 +28,7 @@
 #include "pagx/FontConfig.h"
 #include "pagx/PAGXDocument.h"
 #include "pagx/nodes/Layer.h"
+#include "pagx/utils/VerifyUtils.h"
 #include "tgfx/core/Typeface.h"
 
 namespace pagx::cli {
@@ -63,30 +64,6 @@ static inline std::shared_ptr<tgfx::Typeface> ResolveSystemTypeface(const std::s
     }
   }
   return nullptr;
-}
-
-/**
- * Resolves a fallback font specifier to a Typeface. Accepts either a font file path (containing
- * '/' or ending with a known font extension) or a font name in "family[,style]" format.
- */
-inline std::shared_ptr<tgfx::Typeface> ResolveFallbackTypeface(const std::string& specifier) {
-  // Treat as file path if it contains '/' or ends with a known font extension.
-  bool isFilePath = specifier.find('/') != std::string::npos;
-  if (!isFilePath) {
-    auto dot = specifier.rfind('.');
-    if (dot != std::string::npos) {
-      auto ext = specifier.substr(dot);
-      isFilePath = ext == ".ttf" || ext == ".otf" || ext == ".ttc" || ext == ".woff" ||
-                   ext == ".woff2" || ext == ".TTF" || ext == ".OTF" || ext == ".TTC";
-    }
-  }
-  if (isFilePath) {
-    return tgfx::Typeface::MakeFromPath(specifier);
-  }
-  auto commaPos = specifier.find(',');
-  auto family = commaPos != std::string::npos ? specifier.substr(0, commaPos) : specifier;
-  auto style = commaPos != std::string::npos ? specifier.substr(commaPos + 1) : std::string();
-  return ResolveSystemTypeface(family, style);
 }
 
 /**
@@ -200,22 +177,5 @@ bool LoadFontConfig(FontConfig* fontConfig, const std::vector<std::string>& font
  */
 bool WriteStringToFile(const std::string& content, const std::string& filePath,
                        const std::string& command);
-
-/**
- * Returns true if the Layer uses any feature that Group does not support at all (e.g. blendMode,
- * styles, filters, mask, 3D transforms, container layout, composition, alpha with offscreen
- * semantics). Does NOT check contents or children (callers handle those based on context), nor
- * attributes whose values can be mechanically transferred to a Group (2D matrix, x/y position,
- * width/height, padding, constraint positioning). When adding a new Layer-only attribute, add a corresponding
- * check here; otherwise the attribute will be silently ignored.
- */
-bool HasLayerOnlyFeatures(const Layer* layer);
-
-/**
- * Returns true if the Layer is a plain shell — all attributes are at their default values. Does
- * NOT check contents (the payload to retain). Stricter than HasLayerOnlyFeatures: also requires
- * attributes transferable to Group (x/y position, 2D matrix, size, padding, constraints) to be default.
- */
-bool IsLayerShell(const Layer* layer);
 
 }  // namespace pagx::cli
