@@ -38,6 +38,14 @@ class HardwareDecoderFactory : public VideoDecoderFactory {
 
 static HardwareDecoderFactory hardwareDecoderFactory = {};
 
+template <typename T>
+static void SafeCFRelease(T& object) {
+  if (object) {
+    CFRelease(object);
+    object = nullptr;
+  }
+}
+
 const VideoDecoderFactory* HardwareDecoder::Factory() {
   return &hardwareDecoderFactory;
 }
@@ -150,55 +158,58 @@ bool HardwareDecoder::resetVideoToolBox() {
                         kCVPixelBufferIOSurfacePropertiesKey};
 
   uint32_t pixelFormatType = kCVPixelFormatType_32BGRA;
-  uint32_t openGLCompatibility = true;
 
   CFNumberRef pixelFormatTypeValue = CFNumberCreate(NULL, kCFNumberSInt32Type, &pixelFormatType);
-  CFNumberRef openGLCompatibilityValue =
-      CFNumberCreate(NULL, kCFNumberSInt32Type, &openGLCompatibility);
   CFDictionaryRef ioSurfaceParam =
       CFDictionaryCreate(kCFAllocatorDefault, NULL, NULL, 0, NULL, NULL);
 
-  const void* values[] = {pixelFormatTypeValue, openGLCompatibilityValue, ioSurfaceParam};
+  const void* values[] = {pixelFormatTypeValue, kCFBooleanTrue, ioSurfaceParam};
   inAttrs = CFDictionaryCreate(kCFAllocatorDefault, keys, values, 3, NULL, NULL);
   const void* combineDics[] = {inAttrs};
   CFArrayRef combines = CFArrayCreate(NULL, combineDics, 1, NULL);
   CFDictionaryRef outAttrs = NULL;
-  CVPixelBufferCreateResolvedAttributesDictionary(NULL, combines, &outAttrs);
+  OSStatus attrStatus = CVPixelBufferCreateResolvedAttributesDictionary(NULL, combines, &outAttrs);
   VTDecompressionOutputCallbackRecord callBackRecord;
   callBackRecord.decompressionOutputCallback = DidDecompress;
   callBackRecord.decompressionOutputRefCon = NULL;
 
-  OSStatus status = VTDecompressionSessionCreate(kCFAllocatorDefault, videoFormatDescription, NULL,
-                                                 outAttrs, &callBackRecord, &session);
+  OSStatus status = noErr;
+  if (attrStatus == noErr && outAttrs) {
+    status = VTDecompressionSessionCreate(kCFAllocatorDefault, videoFormatDescription, NULL,
+                                           outAttrs, &callBackRecord, &session);
+  } else {
+    status = attrStatus;
+  }
 
-  CFRelease(outAttrs);
-  CFRelease(combines);
-  CFRelease(inAttrs);
-  CFRelease(pixelFormatTypeValue);
-  CFRelease(openGLCompatibilityValue);
-  CFRelease(ioSurfaceParam);
+  SafeCFRelease(outAttrs);
+  SafeCFRelease(combines);
+  SafeCFRelease(inAttrs);
+  SafeCFRelease(pixelFormatTypeValue);
+  SafeCFRelease(ioSurfaceParam);
+
+  if (status != noErr || !session) {
+    LOGE("HardwareDecoder:decoder session create failed status = %d", status);
+    return false;
+  }
 
   if (colorSpace == tgfx::YUVColorSpace::BT2020_LIMITED ||
       colorSpace == tgfx::YUVColorSpace::BT2020_FULL) {
     CFMutableDictionaryRef pixelTransferProperties = CFDictionaryCreateMutable(
         kCFAllocatorDefault, 0, &kCFTypeDictionaryKeyCallBacks, &kCFTypeDictionaryValueCallBacks);
-    CFDictionarySetValue(pixelTransferProperties,
-                         kVTPixelTransferPropertyKey_DestinationColorPrimaries,
-                         kCVImageBufferColorPrimaries_ITU_R_709_2);
-    CFDictionarySetValue(pixelTransferProperties,
-                         kVTPixelTransferPropertyKey_DestinationTransferFunction,
-                         kCVImageBufferTransferFunction_ITU_R_709_2);
-    CFDictionarySetValue(pixelTransferProperties,
-                         kVTPixelTransferPropertyKey_DestinationYCbCrMatrix,
-                         kCVImageBufferYCbCrMatrix_ITU_R_709_2);
-    VTSessionSetProperty(session, kVTDecompressionPropertyKey_PixelTransferProperties,
-                         pixelTransferProperties);
-    CFRelease(pixelTransferProperties);
-  }
-
-  if (status != noErr || !session) {
-    LOGE("HardwareDecoder:decoder session create failed status = %d", status);
-    return false;
+    if (pixelTransferProperties) {
+      CFDictionarySetValue(pixelTransferProperties,
+                           kVTPixelTransferPropertyKey_DestinationColorPrimaries,
+                           kCVImageBufferColorPrimaries_ITU_R_709_2);
+      CFDictionarySetValue(pixelTransferProperties,
+                           kVTPixelTransferPropertyKey_DestinationTransferFunction,
+                           kCVImageBufferTransferFunction_ITU_R_709_2);
+      CFDictionarySetValue(pixelTransferProperties,
+                           kVTPixelTransferPropertyKey_DestinationYCbCrMatrix,
+                           kCVImageBufferYCbCrMatrix_ITU_R_709_2);
+      VTSessionSetProperty(session, kVTDecompressionPropertyKey_PixelTransferProperties,
+                           pixelTransferProperties);
+      SafeCFRelease(pixelTransferProperties);
+    }
   }
 
   return true;
