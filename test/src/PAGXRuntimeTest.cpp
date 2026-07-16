@@ -16,9 +16,9 @@
 //
 /////////////////////////////////////////////////////////////////////////////////////////////////
 
+#include "pagx/PAGAnimation.h"
 #include "pagx/PAGScene.h"
 #include "pagx/PAGSurface.h"
-#include "pagx/PAGTimeline.h"
 #include "pagx/PAGXDocument.h"
 #include "pagx/nodes/Animation.h"
 #include "pagx/nodes/AnimationObject.h"
@@ -27,6 +27,7 @@
 #include "pagx/nodes/Layer.h"
 #include "pagx/nodes/Rectangle.h"
 #include "pagx/nodes/SolidColor.h"
+#include "pagx/runtime/KeyframeEvaluator.h"
 #include "utils/Baseline.h"
 #include "utils/TestUtils.h"
 
@@ -83,25 +84,25 @@ PAGX_TEST(PAGXRuntimeTest, PAGSceneTimelineLookup) {
   auto file = pagx::PAGScene::Make(doc);
   ASSERT_TRUE(file != nullptr);
 
-  auto ids = file->getTimelineIds();
+  auto ids = file->getAnimationIds();
   ASSERT_EQ(ids.size(), 2u);
   EXPECT_EQ(ids[0], "main");
   EXPECT_EQ(ids[1], "hint");
 
-  auto t1 = file->getTimeline("main");
-  auto t1Again = file->getTimeline("main");
+  auto t1 = file->getAnimation("main");
+  auto t1Again = file->getAnimation("main");
   ASSERT_TRUE(t1 != nullptr);
   EXPECT_EQ(t1.get(), t1Again.get());
   EXPECT_EQ(t1->getId(), "main");
   EXPECT_EQ(t1->duration(), 1'000'000);
 
-  auto t2 = file->getTimeline("hint");
+  auto t2 = file->getAnimation("hint");
   ASSERT_TRUE(t2 != nullptr);
   EXPECT_NE(t1.get(), t2.get());
 
-  EXPECT_EQ(file->getTimeline("missing"), nullptr);
+  EXPECT_EQ(file->getAnimation("missing"), nullptr);
 
-  auto def = file->getDefaultTimeline();
+  auto def = std::static_pointer_cast<pagx::PAGAnimation>(file->getDefaultTimeline());
   EXPECT_EQ(def.get(), t1.get());
 }
 
@@ -178,9 +179,8 @@ PAGX_TEST(PAGXRuntimeTest, AdvanceRendersDistinctFrames) {
 
   auto file = pagx::PAGScene::Make(doc);
   ASSERT_TRUE(file != nullptr);
-  auto timeline = file->getDefaultTimeline();
+  auto timeline = std::static_pointer_cast<pagx::PAGAnimation>(file->getDefaultTimeline());
   ASSERT_TRUE(timeline != nullptr);
-  timeline->play();
 
   auto surface = pagx::PAGSurface::MakeOffscreen(200, 200);
   ASSERT_TRUE(surface != nullptr);
@@ -246,7 +246,7 @@ PAGX_TEST(PAGXRuntimeTest, PAGSceneDrawAutoClearOverlay) {
 
   auto scene = pagx::PAGScene::Make(doc);
   ASSERT_TRUE(scene != nullptr);
-  auto timeline = scene->getDefaultTimeline();
+  auto timeline = std::static_pointer_cast<pagx::PAGAnimation>(scene->getDefaultTimeline());
   ASSERT_TRUE(timeline != nullptr);
   timeline->apply(1.0f);
 
@@ -323,7 +323,7 @@ PAGX_TEST(PAGXRuntimeTest, PAGSurfaceFromBackendTexture) {
 
   auto scene = pagx::PAGScene::Make(doc);
   ASSERT_TRUE(scene != nullptr);
-  auto timeline = scene->getDefaultTimeline();
+  auto timeline = std::static_pointer_cast<pagx::PAGAnimation>(scene->getDefaultTimeline());
   ASSERT_TRUE(timeline != nullptr);
   timeline->apply(1.0f);
 
@@ -395,7 +395,7 @@ PAGX_TEST(PAGXRuntimeTest, PAGSurfaceFromBackendRenderTarget) {
 
   auto scene = pagx::PAGScene::Make(doc);
   ASSERT_TRUE(scene != nullptr);
-  auto timeline = scene->getDefaultTimeline();
+  auto timeline = std::static_pointer_cast<pagx::PAGAnimation>(scene->getDefaultTimeline());
   ASSERT_TRUE(timeline != nullptr);
   timeline->apply(1.0f);
 
@@ -405,6 +405,27 @@ PAGX_TEST(PAGXRuntimeTest, PAGSurfaceFromBackendRenderTarget) {
   context = device->lockContext();
   glDeleteFramebuffers(1, &fbo);
   glDeleteTextures(1, &textureInfo.id);
+}
+
+/**
+ * Test case: EvaluateKeyframeSequence treats KeyframeInterpolationType::None identically to Hold,
+ * holding the left keyframe value across the segment instead of interpolating linearly toward the
+ * right keyframe. This locks the None == Hold semantics so it cannot silently drift back to linear.
+ */
+PAGX_TEST(PAGXRuntimeTest, NoneInterpolationHoldsValue) {
+  std::vector<pagx::Keyframe<float>> keyframes;
+  keyframes.push_back({0, 10.0f, pagx::KeyframeInterpolationType::None, {}, {}});
+  keyframes.push_back({60, 20.0f, pagx::KeyframeInterpolationType::None, {}, {}});
+
+  EXPECT_FLOAT_EQ(pagx::EvaluateKeyframeSequence(keyframes, 0.0), 10.0f);
+  EXPECT_FLOAT_EQ(pagx::EvaluateKeyframeSequence(keyframes, 30.0), 10.0f);
+  EXPECT_FLOAT_EQ(pagx::EvaluateKeyframeSequence(keyframes, 59.0), 10.0f);
+  EXPECT_FLOAT_EQ(pagx::EvaluateKeyframeSequence(keyframes, 60.0), 20.0f);
+
+  std::vector<pagx::Keyframe<float>> linear;
+  linear.push_back({0, 10.0f, pagx::KeyframeInterpolationType::Linear, {}, {}});
+  linear.push_back({60, 20.0f, pagx::KeyframeInterpolationType::Linear, {}, {}});
+  EXPECT_FLOAT_EQ(pagx::EvaluateKeyframeSequence(linear, 30.0), 15.0f);
 }
 
 }  // namespace pag

@@ -98,6 +98,32 @@ enum class NodeType {
    */
   Channel,
 
+  // State Machine
+  /**
+   * A state machine that drives discrete state transitions across one or more parallel regions.
+   */
+  StateMachine,
+  /**
+   * A named orthogonal region inside a StateMachine.
+   */
+  StateRegion,
+  /**
+   * A state within a StateRegion. Concrete kinds are distinguished by State::stateType().
+   */
+  State,
+  /**
+   * A state transition with conditions, crossfade parameters, and exit-time gating.
+   */
+  StateTransition,
+  /**
+   * A condition that gates a StateTransition, referencing a StateMachine input.
+   */
+  TransitionCondition,
+  /**
+   * A named input port (bool / number / trigger) on a StateMachine.
+   */
+  StateMachineInput,
+
   // Layer
   /**
    * A layer node that contains vector elements and child layers.
@@ -218,7 +244,25 @@ enum class NodeType {
   /**
    * A precomposed glyph run for text rendering.
    */
-  GlyphRun
+  GlyphRun,
+
+  /**
+   * A ViewModel schema that declares properties for data binding.
+   */
+  ViewModel,
+  /**
+   * A property declared in a ViewModel schema.
+   */
+  ViewModelProperty,
+  /**
+   * A binding that connects a ViewModel property to a render node channel.
+   */
+  DataBind,
+  /**
+   * A converter that transforms ViewModel property values before they are applied to render node
+   * channels.
+   */
+  DataConverter
 };
 
 /**

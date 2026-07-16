@@ -21,14 +21,19 @@
 #include <memory>
 #include <string>
 #include <unordered_map>
+#include <unordered_set>
 #include <vector>
+#include "pagx/PAGAnimation.h"
 #include "pagx/PAGComposition.h"
 #include "pagx/PAGDisplayOptions.h"
+#include "pagx/PAGStateMachine.h"
 #include "pagx/PAGTimeline.h"
 
 namespace tgfx {
+class Context;
 class DisplayList;
 class Layer;
+class Recording;
 }  // namespace tgfx
 
 namespace pagx {
@@ -36,7 +41,12 @@ namespace pagx {
 class Animation;
 class Node;
 class PAGSurface;
+class PAGViewModel;
 class PAGXDocument;
+class SuppressDelegation;
+class PAGViewModelValue;
+class ViewModel;
+class Image;
 struct Matrix;
 struct RuntimeBinding;
 
@@ -49,7 +59,8 @@ struct RuntimeBinding;
  * PAGScene keeps the source PAGXDocument alive internally, so callers may release their own
  * document handle once the PAGScene is created.
  *
- * Thread safety: PAGScene and the PAGTimeline instances it vends are not thread-safe. Their
+ * Thread safety: PAGScene and the PAGAnimation / PAGStateMachine instances it vends are not
+ * thread-safe. Their
  * playback and render state carry no internal locking, so all calls on a single PAGScene (and its
  * timelines) must be serialized by the caller. Distinct PAGScene instances built from the same
  * PAGXDocument hold independent runtime state and may be driven from different threads, provided
@@ -73,27 +84,47 @@ class PAGScene : public std::enable_shared_from_this<PAGScene> {
    * Returns the ids of all top-level animations in the source document, preserving declaration
    * order. Animations declared inside child Compositions are not included.
    */
-  std::vector<std::string> getTimelineIds() const;
+  std::vector<std::string> getAnimationIds() const;
 
   /**
-   * Returns the PAGTimeline driving the named top-level animation. Repeated calls with the same
+   * Returns the PAGAnimation driving the named top-level animation. Repeated calls with the same
    * id return the same instance, so playback state is shared across all callers driving that
    * animation.
-   * @param id an animation id from getTimelineIds(). Returns nullptr if no top-level
+   * @param id an animation id from getAnimationIds(). Returns nullptr if no top-level
    *           Animation matches the given id.
    */
-  std::shared_ptr<PAGTimeline> getTimeline(const std::string& id);
+  std::shared_ptr<PAGAnimation> getAnimation(const std::string& id);
 
   /**
-   * Returns the PAGTimeline for the first top-level animation in the document, or nullptr if the
-   * document has no top-level animations.
+   * Returns the first top-level playback driver (animation or state machine) in declaration order,
+   * or nullptr if the document has none. The returned shared_ptr points to a PAGAnimation or
+   * PAGStateMachine; use getAnimation() / getStateMachineTimeline() for typed access.
    */
   std::shared_ptr<PAGTimeline> getDefaultTimeline();
+
+  /**
+   * Returns the ids of all top-level state machines in the source document, preserving declaration
+   * order.
+   */
+  std::vector<std::string> getStateMachineIds() const;
+
+  /**
+   * Returns the PAGStateMachine driving the named top-level state machine. Repeated calls
+   * with the same id return the same instance.
+   * @param id a state machine id from getStateMachineIds(). Returns nullptr if no top-level
+   *           StateMachine matches the given id.
+   */
+  std::shared_ptr<PAGStateMachine> getStateMachineTimeline(const std::string& id);
 
   /**
    * Returns the root PAGComposition of this scene.
    */
   std::shared_ptr<PAGComposition> rootComposition() const;
+
+  /**
+   * Returns the root ViewModel for this scene, or nullptr if the document has no ViewModel schema.
+   */
+  std::shared_ptr<PAGViewModel> viewModel() const;
 
   /**
    * Renders the current content of this scene into the given surface. Does not advance animations;
@@ -123,10 +154,19 @@ class PAGScene : public std::enable_shared_from_this<PAGScene> {
   PAGDisplayOptions* getDisplayOptions() const;
 
   /**
+   * Returns true if the scene's content has changed since the last render, i.e. a redraw would
+   * produce different pixels. Hosts driving their own render loop can consult this to skip
+   * redundant full renders on idle frames. Reflects only the runtime layer tree state captured
+   * by the last renderTo()/Record(); pending ViewModel data binds flushed at the next Record()
+   * are not accounted for here.
+   */
+  bool hasContentChanged() const;
+
+  /**
    * Convenience method equivalent to advance(deltaMicroseconds) followed by apply(). advance() and
    * apply() drive the animations that play automatically in this scene (including nested
    * compositions). Top-level animations are not driven here; play them explicitly via
-   * getTimeline(id)->advanceAndApply(...).
+   * getAnimation(id)->advanceAndApply(...).
    */
   void advanceAndApply(int64_t deltaMicroseconds);
 
@@ -157,14 +197,35 @@ class PAGScene : public std::enable_shared_from_this<PAGScene> {
   // document (its nodes are not owned by this scene's document).
   void onNodesChanged(const std::vector<Node*>& dirtyNodes);
 
+  // Dispatch target for PAGXDocument::notifyChange when <Image> resource nodes change (e.g. host
+  // loadFileData). Re-decodes any ViewModel image value built from a changed Image node, unless the
+  // business side has overridden it. Keyed off the Image nodes themselves because a ViewModel
+  // schema is not reachable from the Layer tree that onNodesChanged refreshes.
+  void onImageResourcesChanged(const std::vector<Image*>& changedImages);
+  static void RefreshViewModelImages(PAGComposition* comp,
+                                     const std::unordered_set<const Image*>& changed);
+
   // Builds or rebuilds the runtime layer tree and binding from the document, detaching any previous
   // tree first. Used at creation and when an embedded external document changes (an external
   // composition is built into the tree once and cannot be patched in place).
   void buildRuntimeTree();
+  void buildViewModels();
+  void buildNestedViewModels(PAGComposition* parentComp);
+  static std::shared_ptr<PAGViewModel> CreateViewModelFromSchema(
+      ViewModel* schema, const std::shared_ptr<PAGScene>& scene,
+      std::unordered_set<const ViewModel*>& visited);
+  void flushDataBinds();
+  void clearAllViewModelsDirty();
+  static void ClearCompositionTreeDirty(PAGComposition* comp);
 
   RuntimeBinding* mutableBinding();
 
   tgfx::DisplayList* getDisplayListForOptions() const;
+
+  // Renders the scene into the surface without locking or managing the GPU context. The caller
+  // must hold a valid context lock. Internal method used by draw() and pagx::Record().
+  bool renderTo(const std::shared_ptr<PAGSurface>& surface, tgfx::Context* context,
+                bool autoClear);
 
   // Converts a surface-space point to the layer tree's root coordinate space using the display
   // list's zoomScale and contentOffset. Returns false if the surface point cannot be mapped (zoom
@@ -178,20 +239,33 @@ class PAGScene : public std::enable_shared_from_this<PAGScene> {
 
   std::shared_ptr<PAGXDocument> document = nullptr;
   std::shared_ptr<PAGComposition> _rootComposition = nullptr;
-  std::unordered_map<Animation*, std::shared_ptr<PAGTimeline>> timelinesByAnimation = {};
+  std::shared_ptr<PAGViewModel> rootViewModel = nullptr;
+  // Top-level timelines instantiated on demand by getAnimation/getStateMachineTimeline, keyed by
+  // their source definition node so repeated lookups return the same instance.
+  std::unordered_map<const Node*, std::shared_ptr<PAGTimeline>> instantiatedTimelines = {};
 
   std::unique_ptr<tgfx::DisplayList> displayList;
 
   std::unique_ptr<PAGDisplayOptions> displayOptions = nullptr;
 
+  bool suppressNotify = false;
+  std::vector<PAGViewModelValue*> pendingNotifications = {};
+
   // Maps tgfx layers in the runtime tree to their PAGLayer nodes for hit-test resolution.
   std::unordered_map<const tgfx::Layer*, PAGLayer*> layerRegistry = {};
 
   friend class PAGXDocument;
-  friend class PAGTimeline;
+  friend class PAGAnimation;
+  friend class PAGStateMachine;
   friend class PAGComposition;
   friend class PAGDisplayOptions;
   friend class PAGLayer;
+  friend class PAGViewModelValue;
+  friend class SuppressDelegation;
+  friend std::unique_ptr<tgfx::Recording> Record(tgfx::Context* context,
+                                                  const std::shared_ptr<PAGScene>& scene,
+                                                  const std::shared_ptr<PAGSurface>& surface,
+                                                  bool autoClear);
 };
 
 }  // namespace pagx

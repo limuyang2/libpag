@@ -499,7 +499,8 @@ public class PAGImageView extends View implements PAGAnimator.Listener {
     }
 
     protected void initDecoderInfo() {
-        synchronized (decoderInfo) {
+        decoderInfo.lock();
+        try {
             if (!decoderInfo.isValid()) {
                 if (_composition == null) {
                     _composition = getCompositionFromPath(_pagFilePath);
@@ -515,6 +516,8 @@ public class PAGImageView extends View implements PAGAnimator.Listener {
             }
             refreshMatrixFromScaleMode();
             freezeDraw.set(false);
+        } finally {
+            decoderInfo.unlock();
         }
     }
 

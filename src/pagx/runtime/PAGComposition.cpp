@@ -19,15 +19,21 @@
 #include "pagx/PAGComposition.h"
 #include <unordered_map>
 #include <unordered_set>
+#include "pagx/DataBindRuntime.h"
+#include "pagx/PAGAnimation.h"
 #include "pagx/PAGLayer.h"
 #include "pagx/PAGScene.h"
-#include "pagx/PAGTimeline.h"
+#include "pagx/PAGStateMachine.h"
+#include "pagx/PAGStateMachineRegion.h"
+#include "pagx/PAGViewModel.h"
 #include "pagx/PAGXDocument.h"
 #include "pagx/nodes/Animation.h"
 #include "pagx/nodes/AnimationTimeline.h"
 #include "pagx/nodes/Composition.h"
 #include "pagx/nodes/Layer.h"
 #include "pagx/nodes/Node.h"
+#include "pagx/nodes/StateMachine.h"
+#include "pagx/nodes/StateMachineTimeline.h"
 #include "renderer/LayerBuilder.h"
 #include "tgfx/layers/Layer.h"
 
@@ -44,9 +50,27 @@ LayerType PAGComposition::layerType() const {
   return LayerType::Composition;
 }
 
+std::shared_ptr<PAGViewModel> PAGComposition::viewModel() const {
+  return compositionViewModel;
+}
+
+void PAGComposition::playTimeline(const std::string& id) {
+  pausedTimelineIds.erase(id);
+}
+
+void PAGComposition::pauseTimeline(const std::string& id) {
+  pausedTimelineIds.insert(id);
+}
+
+bool PAGComposition::isTimelinePlaying(const std::string& id) const {
+  return pausedTimelineIds.find(id) == pausedTimelineIds.end();
+}
+
 void PAGComposition::advance(int64_t deltaMicroseconds) {
   for (auto& timeline : timelines) {
-    timeline->advance(deltaMicroseconds);
+    if (isTimelinePlaying(timeline->getId())) {
+      timeline->advance(deltaMicroseconds);
+    }
   }
   PAGLayer::advance(deltaMicroseconds);
 }
@@ -105,25 +129,40 @@ std::shared_ptr<PAGComposition> PAGComposition::MakeChild(
 
 void PAGComposition::spawnTimelines(const std::shared_ptr<PAGScene>& scene) {
   timelines.clear();
+  pausedTimelineIds.clear();
   if (node == nullptr) {
     return;
   }
   for (const auto& driver : node->timelines) {
-    if (driver == nullptr || driver->timelineType() != TimelineType::Animation) {
+    if (driver == nullptr) {
       continue;
     }
-    auto* animationDriver = static_cast<const AnimationTimeline*>(driver.get());
-    auto* animation =
-        document != nullptr ? document->findNode<Animation>(animationDriver->animationId) : nullptr;
-    if (animation == nullptr) {
-      continue;
+    if (driver->timelineType() == TimelineType::Animation) {
+      auto* animationDriver = static_cast<const AnimationTimeline*>(driver.get());
+      auto* animation = document != nullptr
+                            ? document->findNode<Animation>(animationDriver->animationId)
+                            : nullptr;
+      if (animation == nullptr) {
+        continue;
+      }
+      auto timeline = std::shared_ptr<PAGAnimation>(
+          new PAGAnimation(animation, binding.get(), document, scene));
+      if (!animationDriver->playing) {
+        pausedTimelineIds.insert(animation->id);
+      }
+      timelines.push_back(std::move(timeline));
+    } else if (driver->timelineType() == TimelineType::StateMachine) {
+      auto* smDriver = static_cast<const StateMachineTimeline*>(driver.get());
+      auto* sm = document != nullptr ? document->findNode<StateMachine>(smDriver->stateMachineId)
+                                     : nullptr;
+      if (sm == nullptr) {
+        continue;
+      }
+      auto smTimeline =
+          std::shared_ptr<PAGStateMachine>(new PAGStateMachine(sm, binding.get(), document, scene));
+      binding->setTarget(sm, std::make_unique<StateMachineInputTarget>(smTimeline, sm));
+      timelines.push_back(std::move(smTimeline));
     }
-    auto timeline =
-        std::shared_ptr<PAGTimeline>(new PAGTimeline(animation, binding.get(), document, scene));
-    if (!animationDriver->playing) {
-      timeline->pause();
-    }
-    timelines.push_back(std::move(timeline));
   }
 }
 
@@ -174,6 +213,25 @@ void PAGComposition::BuildChildren(RuntimeBinding* binding, const std::vector<La
   }
 }
 
+void PAGComposition::CollectChildCompositions(PAGLayer* layer,
+                                              std::vector<PAGComposition*>& outChildren) {
+  if (layer == nullptr) {
+    return;
+  }
+  for (auto& child : layer->children) {
+    if (child == nullptr) {
+      continue;
+    }
+    if (child->layerType() == LayerType::Composition) {
+      outChildren.push_back(static_cast<PAGComposition*>(child.get()));
+    } else {
+      // A plain layer container holds no view model of its own but may nest compositions; descend
+      // through it so those compositions are still reached.
+      CollectChildCompositions(child.get(), outChildren);
+    }
+  }
+}
+
 void PAGComposition::refreshNodes(const std::vector<Node*>& dirtyNodes,
                                   const std::unordered_set<const Node*>& dirtySet,
                                   std::unordered_set<const Composition*>& visited) {
@@ -192,6 +250,7 @@ void PAGComposition::refreshNodes(const std::vector<Node*>& dirtyNodes,
   }
 
   if (binding != nullptr) {
+    bool refreshedLayer = false;
     for (auto* dirty : dirtyNodes) {
       if (dirty == nullptr || dirty->nodeType() != NodeType::Layer) {
         continue;
@@ -199,7 +258,14 @@ void PAGComposition::refreshNodes(const std::vector<Node*>& dirtyNodes,
       auto* dirtyLayer = static_cast<Layer*>(dirty);
       if (binding->get<tgfx::Layer>(dirtyLayer) != nullptr) {
         LayerBuilder::RefreshLayerInPlace(dirtyLayer, binding.get(), document);
+        refreshedLayer = true;
       }
+    }
+    // A refreshed layer rebuilds its runtime targets, resetting their channels to the node
+    // defaults. Re-mark this composition's bindings dirty so the next updateDataBinds re-applies
+    // the current ViewModel values instead of leaving the rebuilt targets at their defaults.
+    if (refreshedLayer && dataBindRuntime != nullptr) {
+      dataBindRuntime->markAllDirty();
     }
   }
   for (auto& child : children) {
@@ -391,6 +457,18 @@ void PAGComposition::refreshPlainContainerChildren(
     } else if (!child->children.empty()) {
       refreshPlainContainerChildren(child.get(), dirtyNodes, visited, dirtySet);
     }
+  }
+}
+
+void PAGComposition::updateDataBinds(float mix) {
+  if (dataBindRuntime != nullptr) {
+    dataBindRuntime->syncBack(binding.get());
+    dataBindRuntime->update(binding.get(), mix);
+  }
+  std::vector<PAGComposition*> childComps = {};
+  CollectChildCompositions(this, childComps);
+  for (auto* childComp : childComps) {
+    childComp->updateDataBinds(mix);
   }
 }
 

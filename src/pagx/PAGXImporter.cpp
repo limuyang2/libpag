@@ -37,6 +37,8 @@
 #include "pagx/nodes/ColorMatrixFilter.h"
 #include "pagx/nodes/Composition.h"
 #include "pagx/nodes/ConicGradient.h"
+#include "pagx/nodes/DataBind.h"
+#include "pagx/nodes/DataConverter.h"
 #include "pagx/nodes/DiamondGradient.h"
 #include "pagx/nodes/DropShadowFilter.h"
 #include "pagx/nodes/DropShadowStyle.h"
@@ -63,12 +65,21 @@
 #include "pagx/nodes/Repeater.h"
 #include "pagx/nodes/RoundCorner.h"
 #include "pagx/nodes/SolidColor.h"
+#include "pagx/nodes/State.h"
+#include "pagx/nodes/StateMachine.h"
+#include "pagx/nodes/StateMachineInput.h"
+#include "pagx/nodes/StateMachineTimeline.h"
+#include "pagx/nodes/StateRegion.h"
+#include "pagx/nodes/StateTransition.h"
 #include "pagx/nodes/Stroke.h"
 #include "pagx/nodes/Text.h"
 #include "pagx/nodes/TextBox.h"
 #include "pagx/nodes/TextModifier.h"
 #include "pagx/nodes/TextPath.h"
+#include "pagx/nodes/TransitionCondition.h"
 #include "pagx/nodes/TrimPath.h"
+#include "pagx/nodes/ViewModel.h"
+#include "pagx/nodes/ViewModelProperty.h"
 #include "pagx/svg/SVGPathParser.h"
 #include "pagx/types/Color.h"
 #include "pagx/utils/Base64.h"
@@ -137,8 +148,7 @@ static EnumType GetEnumAttribute(const DOMNode* node, const char* name,
 // Forward declarations for parse functions
 static void ParseDocument(const DOMNode* root, PAGXDocument* doc);
 static void ParseResources(const DOMNode* node, PAGXDocument* doc);
-static void ParseAnimations(const DOMNode* node, std::vector<Animation*>* animations,
-                            PAGXDocument* doc);
+static void ParseAnimations(const DOMNode* node, std::vector<Node*>* animations, PAGXDocument* doc);
 static Layer* ParseLayer(const DOMNode* node, PAGXDocument* doc);
 static void ParseContents(const DOMNode* node, Layer* layer, PAGXDocument* doc);
 static void ParseStyles(const DOMNode* node, Layer* layer, PAGXDocument* doc);
@@ -148,6 +158,9 @@ static Element* ParseElement(const DOMNode* node, PAGXDocument* doc);
 static ColorSource* ParseColorSource(const DOMNode* node, PAGXDocument* doc);
 static LayerStyle* ParseLayerStyle(const DOMNode* node, PAGXDocument* doc);
 static LayerFilter* ParseLayerFilter(const DOMNode* node, PAGXDocument* doc);
+static ViewModel* ParseViewModel(const DOMNode* node, PAGXDocument* doc);
+static DataBind* ParseDataBind(const DOMNode* node, PAGXDocument* doc);
+static DataConverter* ParseDataConverter(const DOMNode* node, PAGXDocument* doc);
 static Rectangle* ParseRectangle(const DOMNode* node, PAGXDocument* doc);
 static Ellipse* ParseEllipse(const DOMNode* node, PAGXDocument* doc);
 static Polystar* ParsePolystar(const DOMNode* node, PAGXDocument* doc);
@@ -187,6 +200,18 @@ static BlendFilter* ParseBlendFilter(const DOMNode* node, PAGXDocument* doc);
 static ColorMatrixFilter* ParseColorMatrixFilter(const DOMNode* node, PAGXDocument* doc);
 static NoiseStyle* ParseNoiseStyle(const DOMNode* node, PAGXDocument* doc);
 static NoiseFilter* ParseNoiseFilter(const DOMNode* node, PAGXDocument* doc);
+
+// A `mask="@id"` reference whose target Layer was not yet registered when the owning Layer was
+// parsed. A mask layer is commonly authored as a (later-parsed) descendant of the masked layer —
+// e.g. the HTML importer attaches the rebuilt mask as an invisible child — so its id is unknown at
+// the moment the parent's `mask` attribute is read. These are collected during the layer walk and
+// resolved once the whole tree (and therefore `nodeMap`) is complete. See ResolvePendingMasks.
+struct PendingMaskRef {
+  Layer* owner = nullptr;
+  std::string maskId = {};
+  const DOMNode* node = nullptr;  // owning Layer's DOM node, for error reporting
+};
+static std::vector<PendingMaskRef> gPendingMaskRefs = {};
 
 //==============================================================================
 // Custom data parsing
@@ -308,6 +333,10 @@ static bool PreRegisterResource(const DOMNode* node, PAGXDocument* doc) {
     doc->makeNode<DiamondGradient>(id);
   } else if (node->name == "ImagePattern") {
     doc->makeNode<ImagePattern>(id);
+  } else if (node->name == "ViewModel") {
+    doc->makeNode<ViewModel>(id);
+  } else if (node->name == "DataConverter") {
+    doc->makeNode<DataConverter>(id);
   } else {
     return false;
   }
@@ -327,6 +356,10 @@ static bool ParseResource(const DOMNode* node, PAGXDocument* doc) {
     ParseFont(node, doc);
   } else if (node->name == "Composition") {
     ParseComposition(node, doc);
+  } else if (node->name == "ViewModel") {
+    ParseViewModel(node, doc);
+  } else if (node->name == "DataConverter") {
+    ParseDataConverter(node, doc);
   } else {
     return ParseColorSource(node, doc) != nullptr;
   }
@@ -357,8 +390,8 @@ static void ParseResources(const DOMNode* node, PAGXDocument* doc) {
                   "Element '" + current->name +
                       "' is not allowed in 'Resources'."
                       " Expected: Image, PathData, Composition, Font,"
-                      " SolidColor, LinearGradient, RadialGradient,"
-                      " ConicGradient, DiamondGradient, ImagePattern.");
+                      " ViewModel, DataConverter, SolidColor, LinearGradient,"
+                      " RadialGradient, ConicGradient, DiamondGradient, ImagePattern.");
     }
   }
 }
@@ -493,7 +526,10 @@ static Layer* ParseLayer(const DOMNode* node, PAGXDocument* doc) {
   if (!maskAttr.empty() && maskAttr[0] == '@') {
     layer->mask = doc->findNode<Layer>(maskAttr.substr(1));
     if (!layer->mask) {
-      ReportError(doc, node, "Resource '" + maskAttr + "' not found for 'mask' attribute.");
+      // The mask layer is often a later-parsed descendant of this layer (the HTML importer
+      // attaches the rebuilt mask as an invisible child), so its id is not yet in nodeMap. Defer
+      // resolution to ResolvePendingMasks after the full tree is parsed instead of erroring now.
+      gPendingMaskRefs.push_back({layer, maskAttr.substr(1), node});
     }
   }
   layer->maskType = GET_ENUM(node, "maskType", "alpha", doc, MaskType);
@@ -509,6 +545,7 @@ static Layer* ParseLayer(const DOMNode* node, PAGXDocument* doc) {
     layer->compositionFilePath = compositionAttr;
   }
   layer->timelines.clear();
+  layer->vmContext = GetAttribute(node, "vmContext");
 
   // Build directive attributes.
   layer->importDirective.source = GetAttribute(node, "import");
@@ -673,11 +710,21 @@ static void ParseLayerTimelines(const DOMNode* node, Layer* layer, PAGXDocument*
       driver->animationId = refAttr.substr(1);
       driver->playing = GetBoolAttribute(current.get(), "playing", true, doc);
       layer->timelines.push_back(std::move(driver));
+    } else if (current->name == "StateMachine") {
+      auto refAttr = GetAttribute(current.get(), "ref");
+      if (refAttr.empty() || refAttr[0] != '@') {
+        ReportError(doc, current.get(),
+                    "Timelines/StateMachine requires 'ref' attribute starting with '@'.");
+        continue;
+      }
+      auto driver = std::make_unique<StateMachineTimeline>();
+      driver->stateMachineId = refAttr.substr(1);
+      layer->timelines.push_back(std::move(driver));
     } else {
       ReportError(doc, current.get(),
                   "Element '" + current->name +
                       "' is not allowed in 'Timelines'."
-                      " Expected: Animation.");
+                      " Expected: Animation or StateMachine.");
     }
   }
 }
@@ -1490,6 +1537,13 @@ static Composition* ParseComposition(const DOMNode* node, PAGXDocument* doc) {
   }
   comp->width = GetFloatAttribute(node, "width", Default<Composition>().width, doc);
   comp->height = GetFloatAttribute(node, "height", Default<Composition>().height, doc);
+  auto viewModelAttr = GetAttribute(node, "viewModel");
+  if (!viewModelAttr.empty() && viewModelAttr[0] == '@') {
+    comp->viewModel = doc->findNode<ViewModel>(viewModelAttr.substr(1));
+    if (!comp->viewModel)
+      ReportError(doc, node,
+                  "Resource '" + viewModelAttr + "' not found for 'viewModel' attribute.");
+  }
   auto child = node->firstChild;
   while (child) {
     if (child->type == DOMNodeType::Element) {
@@ -1500,10 +1554,14 @@ static Composition* ParseComposition(const DOMNode* node, PAGXDocument* doc) {
         }
       } else if (child->name == "Animations") {
         ParseAnimations(child.get(), &comp->animations, doc);
+      } else if (child->name == "DataBind") {
+        auto bind = ParseDataBind(child.get(), doc);
+        if (bind) comp->dataBinds.push_back(bind);
       } else {
-        ReportError(doc, child.get(),
-                    "Element '" + child->name +
-                        "' is not allowed in 'Composition'. Expected: Layer, Animations.");
+        ReportError(
+            doc, child.get(),
+            "Element '" + child->name +
+                "' is not allowed in 'Composition'. Expected: Layer, Animations, DataBind.");
       }
     }
     child = child->nextSibling;
@@ -1825,7 +1883,233 @@ static Animation* ParseAnimation(const DOMNode* node, PAGXDocument* doc) {
   return animation;
 }
 
-static void ParseAnimations(const DOMNode* node, std::vector<Animation*>* animations,
+// =============================================================================
+// State Machine Parsing
+// =============================================================================
+
+static TransitionCondition* ParseCondition(const DOMNode* node, PAGXDocument* doc) {
+  auto condition = makeNodeFromXML<TransitionCondition>(node, doc);
+  if (!condition) {
+    return nullptr;
+  }
+  condition->inputName = GetAttribute(node, "input");
+  if (condition->inputName.empty()) {
+    ReportError(doc, node, "Condition requires a non-empty 'input' attribute.");
+    return condition;
+  }
+  auto opStr = GetAttribute(node, "op");
+  if (opStr == "equal") {
+    condition->op = TransitionConditionOp::Equal;
+  } else if (opStr == "notEqual") {
+    condition->op = TransitionConditionOp::NotEqual;
+  } else if (opStr == "lessThan") {
+    condition->op = TransitionConditionOp::LessThan;
+  } else if (opStr == "lessThanOrEqual") {
+    condition->op = TransitionConditionOp::LessThanOrEqual;
+  } else if (opStr == "greaterThan") {
+    condition->op = TransitionConditionOp::GreaterThan;
+  } else if (opStr == "greaterThanOrEqual") {
+    condition->op = TransitionConditionOp::GreaterThanOrEqual;
+  } else if (opStr == "trigger") {
+    condition->op = TransitionConditionOp::Trigger;
+  } else {
+    ReportError(doc, node, "Condition requires a valid 'op' attribute.");
+    return condition;
+  }
+  if (condition->op != TransitionConditionOp::Trigger) {
+    auto valueStr = GetAttribute(node, "value");
+    if (valueStr.empty()) {
+      ReportError(doc, node,
+                  "Condition requires a non-empty 'value' attribute for op '" + opStr + "'.");
+      return condition;
+    }
+    condition->valueBool = (valueStr == "true");
+    if (!condition->valueBool && valueStr != "false") {
+      condition->valueNumber = GetFloatAttribute(node, "value", 0.0f, doc);
+    }
+  }
+  return condition;
+}
+
+static StateTransition* ParseTransition(const DOMNode* node, PAGXDocument* doc) {
+  auto transition = makeNodeFromXML<StateTransition>(node, doc);
+  if (!transition) {
+    return nullptr;
+  }
+  transition->from = GetAttribute(node, "from");
+  transition->to = GetAttribute(node, "to");
+  if (transition->from.empty() || transition->to.empty()) {
+    ReportError(doc, node, "Transition requires non-empty 'from' and 'to' attributes.");
+    return transition;
+  }
+  transition->duration = GetInt64Attribute(node, "duration", 0, doc);
+  transition->frameRate = GetFloatAttribute(node, "frameRate", 60.0f, doc);
+  auto interp = GetAttribute(node, "interpolation", "linear");
+  transition->interpolation = ParseKeyframeInterpolation(interp, doc, node);
+  if (transition->interpolation == KeyframeInterpolationType::Bezier) {
+    transition->bezierOut = GetPointAttribute(node, "bezier-out", {0.0f, 0.0f}, doc);
+    transition->bezierIn = GetPointAttribute(node, "bezier-in", {0.0f, 0.0f}, doc);
+  }
+  transition->enableEarlyExit = GetBoolAttribute(node, "earlyExit", false, doc);
+  transition->pauseOnExit = GetBoolAttribute(node, "pauseOnExit", false, doc);
+  auto child = node->firstChild;
+  while (child) {
+    if (child->type == DOMNodeType::Element && child->name == "Condition") {
+      auto condition = ParseCondition(child.get(), doc);
+      if (condition != nullptr) {
+        transition->conditions.push_back(condition);
+      }
+    } else if (child->type == DOMNodeType::Element) {
+      ReportError(
+          doc, child.get(),
+          "Element '" + child->name + "' is not allowed in 'Transition'. Expected: Condition.");
+    }
+    child = child->nextSibling;
+  }
+  return transition;
+}
+
+static State* ParseState(const DOMNode* node, PAGXDocument* doc) {
+  auto state = makeNodeFromXML<AnimationState>(node, doc);
+  if (!state) {
+    return nullptr;
+  }
+  state->name = GetAttribute(node, "name");
+  if (state->name.empty()) {
+    ReportError(doc, node, "State requires a non-empty 'name' attribute.");
+    return state;
+  }
+  auto animationAttr = GetAttribute(node, "animation");
+  if (!animationAttr.empty() && animationAttr[0] == '@') {
+    state->animationId = animationAttr.substr(1);
+  } else if (!animationAttr.empty()) {
+    ReportError(doc, node,
+                "State 'animation' must reference an Animation by id (e.g. \"@id\"), got '" +
+                    animationAttr + "'.");
+  }
+  return state;
+}
+
+static StateRegion* ParseStateRegion(const DOMNode* node, PAGXDocument* doc) {
+  auto region = makeNodeFromXML<StateRegion>(node, doc);
+  if (!region) {
+    return nullptr;
+  }
+  region->name = GetAttribute(node, "name");
+  region->initialState = GetAttribute(node, "initialState");
+  if (region->initialState.empty()) {
+    ReportError(doc, node, "StateRegion requires a non-empty 'initialState' attribute.");
+  }
+  auto child = node->firstChild;
+  while (child) {
+    if (child->type != DOMNodeType::Element) {
+      child = child->nextSibling;
+      continue;
+    }
+    if (child->name == "States") {
+      auto stateChild = child->firstChild;
+      while (stateChild) {
+        if (stateChild->type == DOMNodeType::Element && stateChild->name == "State") {
+          auto st = ParseState(stateChild.get(), doc);
+          if (st != nullptr) {
+            region->states.push_back(st);
+          }
+        } else if (stateChild->type == DOMNodeType::Element) {
+          ReportError(
+              doc, stateChild.get(),
+              "Element '" + stateChild->name + "' is not allowed in 'States'. Expected: State.");
+        }
+        stateChild = stateChild->nextSibling;
+      }
+    } else if (child->name == "Transitions") {
+      auto transChild = child->firstChild;
+      while (transChild) {
+        if (transChild->type == DOMNodeType::Element && transChild->name == "Transition") {
+          auto tr = ParseTransition(transChild.get(), doc);
+          if (tr != nullptr) {
+            region->transitions.push_back(tr);
+          }
+        } else if (transChild->type == DOMNodeType::Element) {
+          ReportError(doc, transChild.get(),
+                      "Element '" + transChild->name +
+                          "' is not allowed in 'Transitions'. Expected: Transition.");
+        }
+        transChild = transChild->nextSibling;
+      }
+    } else {
+      ReportError(doc, child.get(),
+                  "Element '" + child->name +
+                      "' is not allowed in 'StateRegion'. Expected: States, "
+                      "Transitions.");
+    }
+    child = child->nextSibling;
+  }
+  return region;
+}
+
+static StateMachine* ParseStateMachine(const DOMNode* node, PAGXDocument* doc) {
+  auto sm = makeNodeFromXML<StateMachine>(node, doc);
+  if (!sm) {
+    return nullptr;
+  }
+  auto child = node->firstChild;
+  while (child) {
+    if (child->type != DOMNodeType::Element) {
+      child = child->nextSibling;
+      continue;
+    }
+    if (child->name == "Inputs") {
+      auto inputChild = child->firstChild;
+      while (inputChild) {
+        if (inputChild->type == DOMNodeType::Element && inputChild->name == "Input") {
+          auto input = makeNodeFromXML<StateMachineInput>(inputChild.get(), doc);
+          if (input) {
+            input->name = GetAttribute(inputChild.get(), "name");
+            auto typeStr = GetAttribute(inputChild.get(), "type");
+            if (typeStr == "bool") {
+              input->type = StateMachineInputType::Bool;
+              input->defaultBool = GetBoolAttribute(inputChild.get(), "default", false, doc);
+            } else if (typeStr == "number") {
+              input->type = StateMachineInputType::Number;
+              input->defaultNumber = GetFloatAttribute(inputChild.get(), "default", 0.0f, doc);
+            } else if (typeStr == "trigger") {
+              input->type = StateMachineInputType::Trigger;
+            } else {
+              ReportError(doc, inputChild.get(),
+                          "Input requires a valid 'type' attribute ('bool', 'number', or "
+                          "'trigger').");
+            }
+            if (input->name.empty()) {
+              ReportError(doc, inputChild.get(), "Input requires a non-empty 'name' attribute.");
+            }
+            sm->inputs.push_back(input);
+          }
+        } else if (inputChild->type == DOMNodeType::Element) {
+          ReportError(
+              doc, inputChild.get(),
+              "Element '" + inputChild->name + "' is not allowed in 'Inputs'. Expected: Input.");
+        }
+        inputChild = inputChild->nextSibling;
+      }
+    } else if (child->name == "StateRegion") {
+      auto region = ParseStateRegion(child.get(), doc);
+      if (region != nullptr) {
+        sm->regions.push_back(region);
+      }
+    } else {
+      ReportError(doc, child.get(),
+                  "Element '" + child->name +
+                      "' is not allowed in 'StateMachine'. Expected: Inputs, StateRegion.");
+    }
+    child = child->nextSibling;
+  }
+  if (sm->regions.empty()) {
+    ReportError(doc, node, "StateMachine requires at least one StateRegion.");
+  }
+  return sm;
+}
+
+static void ParseAnimations(const DOMNode* node, std::vector<Node*>* animations,
                             PAGXDocument* doc) {
   auto child = node->firstChild;
   while (child) {
@@ -1835,10 +2119,15 @@ static void ParseAnimations(const DOMNode* node, std::vector<Animation*>* animat
         if (animation != nullptr) {
           animations->push_back(animation);
         }
+      } else if (child->name == "StateMachine") {
+        auto* sm = ParseStateMachine(child.get(), doc);
+        if (sm != nullptr) {
+          animations->push_back(sm);
+        }
       } else {
-        ReportError(
-            doc, child.get(),
-            "Element '" + child->name + "' is not allowed in 'Animations'. Expected: Animation.");
+        ReportError(doc, child.get(),
+                    "Element '" + child->name +
+                        "' is not allowed in 'Animations'. Expected: Animation or StateMachine.");
       }
     }
     child = child->nextSibling;
@@ -1851,6 +2140,8 @@ static Font* ParseFont(const DOMNode* node, PAGXDocument* doc) {
     return nullptr;
   }
   font->unitsPerEm = GetIntAttribute(node, "unitsPerEm", Default<Font>().unitsPerEm, doc);
+  font->file = GetAttribute(node, "file");
+  font->fileOriginal = font->file;
   auto child = node->firstChild;
   while (child) {
     if (child->type == DOMNodeType::Element) {
@@ -2590,6 +2881,13 @@ static Color GetColorAttribute(const DOMNode* node, const char* name, PAGXDocume
 // Public API implementation
 //==============================================================================
 
+static void ResolveRelativePath(const std::string& basePath, std::string& path) {
+  if (path.empty() || path[0] == '/' || path.find("://") != std::string::npos) {
+    return;
+  }
+  path = basePath + path;
+}
+
 std::shared_ptr<PAGXDocument> PAGXImporter::FromFile(const std::string& filePath) {
   std::ifstream file(filePath, std::ios::binary | std::ios::ate);
   if (!file) {
@@ -2618,10 +2916,11 @@ std::shared_ptr<PAGXDocument> PAGXImporter::FromFile(const std::string& filePath
       for (auto& node : doc->nodes) {
         if (node->nodeType() == NodeType::Image) {
           auto* image = static_cast<Image*>(node.get());
-          if (!image->filePath.empty() && image->filePath[0] != '/' &&
-              image->filePath.find("://") == std::string::npos) {
-            image->filePath = basePath + image->filePath;
-          }
+          ResolveRelativePath(basePath, image->filePath);
+        }
+        if (node->nodeType() == NodeType::Font) {
+          auto* font = static_cast<Font*>(node.get());
+          ResolveRelativePath(basePath, font->file);
         }
       }
     }
@@ -2651,11 +2950,20 @@ static void ParseDocument(const DOMNode* root, PAGXDocument* doc) {
   doc->width = GetFloatAttribute(root, "width", 0, doc);
   doc->height = GetFloatAttribute(root, "height", 0, doc);
   ParseCustomData(root, doc);
+  gPendingMaskRefs.clear();
 
   // First pass: Parse Resources.
   auto child = root->getFirstChild("Resources");
   if (child) {
     ParseResources(child.get(), doc);
+  }
+
+  auto viewModelAttr = GetAttribute(root, "viewModel");
+  if (!viewModelAttr.empty() && viewModelAttr[0] == '@') {
+    doc->viewModel = doc->findNode<ViewModel>(viewModelAttr.substr(1));
+    if (!doc->viewModel)
+      ReportError(doc, root,
+                  "Resource '" + viewModelAttr + "' not found for 'viewModel' attribute.");
   }
 
   // Second pass: Parse Layers.
@@ -2669,14 +2977,232 @@ static void ParseDocument(const DOMNode* root, PAGXDocument* doc) {
         }
       } else if (child->name == "Animations") {
         ParseAnimations(child.get(), &doc->animations, doc);
+      } else if (child->name == "DataBind") {
+        auto bind = ParseDataBind(child.get(), doc);
+        if (bind) doc->dataBinds.push_back(bind);
       } else if (child->name != "Resources") {
-        ReportError(doc, child.get(),
-                    "Element '" + child->name +
-                        "' is not allowed in 'pagx'. Expected: Resources, Layer, Animations.");
+        ReportError(
+            doc, child.get(),
+            "Element '" + child->name +
+                "' is not allowed in 'pagx'. Expected: Resources, Layer, Animations, DataBind.");
       }
     }
     child = child->nextSibling;
   }
+
+  // Third pass: resolve any forward `mask="@id"` references now that every Layer id is in nodeMap.
+  for (const auto& pending : gPendingMaskRefs) {
+    auto* maskLayer = doc->findNode<Layer>(pending.maskId);
+    if (maskLayer) {
+      pending.owner->mask = maskLayer;
+    } else {
+      ReportError(doc, pending.node,
+                  "Resource '@" + pending.maskId + "' not found for 'mask' attribute.");
+    }
+  }
+  gPendingMaskRefs.clear();
+}
+
+// Splits a comma-joined enum "options" attribute, honoring backslash escapes produced on export:
+// "\\" decodes to a literal backslash and "\," to a literal comma, so an option value containing a
+// comma round-trips correctly. A token is emitted on every comma boundary regardless of whether it
+// is empty, so empty option values are preserved and option indices stay aligned with export. An
+// empty options string yields no options (not a single empty one).
+static std::vector<std::string> SplitEnumOptions(const std::string& optionsStr) {
+  std::vector<std::string> options;
+  std::string current;
+  bool escaped = false;
+  bool inList = false;
+  for (char c : optionsStr) {
+    inList = true;
+    if (escaped) {
+      current += c;
+      escaped = false;
+    } else if (c == '\\') {
+      escaped = true;
+    } else if (c == ',') {
+      options.push_back(current);
+      current.clear();
+    } else {
+      current += c;
+    }
+  }
+  if (inList) options.push_back(current);
+  return options;
+}
+
+static ViewModel* ParseViewModel(const DOMNode* node, PAGXDocument* doc) {
+  auto vm = makeNodeFromXML<ViewModel>(node, doc);
+  if (!vm) return nullptr;
+  auto child = node->firstChild;
+  while (child) {
+    if (child->type == DOMNodeType::Element && child->name == "Property") {
+      auto prop = makeNodeFromXML<ViewModelProperty>(child.get(), doc);
+      if (prop) {
+        prop->name = GetAttribute(child.get(), "name");
+        auto typeStr = GetAttribute(child.get(), "type");
+        if (typeStr == "Number" || typeStr == "number") {
+          prop->propertyType = ViewModelPropertyType::Number;
+          prop->defaultNumber = GetFloatAttribute(child.get(), "default", prop->defaultNumber, doc);
+        } else if (typeStr == "String" || typeStr == "string") {
+          prop->propertyType = ViewModelPropertyType::String;
+          prop->defaultString = GetAttribute(child.get(), "default");
+        } else if (typeStr == "Boolean" || typeStr == "boolean") {
+          prop->propertyType = ViewModelPropertyType::Boolean;
+          prop->defaultBoolean =
+              GetBoolAttribute(child.get(), "default", prop->defaultBoolean, doc);
+        } else if (typeStr == "Color" || typeStr == "color") {
+          prop->propertyType = ViewModelPropertyType::Color;
+          prop->defaultColor = GetColorAttribute(child.get(), "default", doc);
+        } else if (typeStr == "Image" || typeStr == "image") {
+          prop->propertyType = ViewModelPropertyType::Image;
+          auto imageAttr = GetAttribute(child.get(), "default");
+          if (!imageAttr.empty()) {
+            if (imageAttr[0] == '@') {
+              prop->defaultImage = doc->findNode<Image>(imageAttr.substr(1));
+              if (!prop->defaultImage) {
+                ReportError(doc, child.get(),
+                            "Resource '" + imageAttr + "' not found for 'default' attribute.");
+              }
+            } else {
+              ReportError(doc, child.get(),
+                          "Image 'default' must reference an Image resource by id (e.g. "
+                          "\"@imageId\"), got '" +
+                              imageAttr + "'.");
+            }
+          }
+        } else if (typeStr == "ViewModel" || typeStr == "viewModel") {
+          prop->propertyType = ViewModelPropertyType::ViewModel;
+        } else if (typeStr == "Enum" || typeStr == "enum") {
+          prop->propertyType = ViewModelPropertyType::Enum;
+          prop->defaultEnum = GetIntAttribute(child.get(), "default", prop->defaultEnum, doc);
+        } else if (typeStr == "Trigger" || typeStr == "trigger") {
+          prop->propertyType = ViewModelPropertyType::Trigger;
+        } else {
+          ReportError(doc, child.get(), "Invalid value '" + typeStr + "' for 'type' attribute.");
+        }
+        if (prop->propertyType == ViewModelPropertyType::Number) {
+          prop->minValue = GetOptionalFloatAttribute(child.get(), "min", doc);
+          prop->maxValue = GetOptionalFloatAttribute(child.get(), "max", doc);
+        }
+        auto optionsStr = GetAttribute(child.get(), "options");
+        if (!optionsStr.empty()) {
+          prop->enumOptions = SplitEnumOptions(optionsStr);
+        }
+        // An out-of-range Enum default would otherwise be silently accepted and dereference past
+        // the option list at runtime. With no options the default is unconstrained, so skip the
+        // check: the exporter omits both the option list and a zero default, and re-importing that
+        // output must not raise a spurious error.
+        if (prop->propertyType == ViewModelPropertyType::Enum) {
+          auto optionCount = static_cast<int>(prop->enumOptions.size());
+          if (optionCount > 0 && (prop->defaultEnum < 0 || prop->defaultEnum >= optionCount)) {
+            ReportError(doc, child.get(),
+                        "Enum 'default' index " + std::to_string(prop->defaultEnum) +
+                            " is out of range for " + std::to_string(optionCount) + " option(s).");
+            prop->defaultEnum = prop->defaultEnum < 0 ? 0 : optionCount - 1;
+          }
+        }
+        auto converterId = GetAttribute(child.get(), "dataConverter");
+        if (!converterId.empty() && converterId[0] == '@') {
+          prop->dataConverter = doc->findNode<DataConverter>(converterId.substr(1));
+          if (!prop->dataConverter)
+            ReportError(doc, child.get(),
+                        "Resource '" + converterId + "' not found for 'dataConverter' attribute.");
+        }
+        if (prop->propertyType == ViewModelPropertyType::ViewModel) {
+          auto vmRef = GetAttribute(child.get(), "viewModelRef");
+          if (!vmRef.empty() && vmRef[0] == '@') {
+            prop->viewModelRef = doc->findNode<ViewModel>(vmRef.substr(1));
+            if (!prop->viewModelRef)
+              ReportError(doc, child.get(),
+                          "Resource '" + vmRef + "' not found for 'viewModelRef' attribute.");
+          }
+        }
+        // A property name is the key used to resolve DataBind sources and typed accessors, so an
+        // empty or duplicate name would make the schema ambiguous. Report and skip such properties
+        // rather than letting a later one silently shadow an earlier one.
+        if (prop->name.empty()) {
+          ReportError(doc, child.get(), "ViewModel 'Property' is missing a non-empty 'name'.");
+        } else {
+          bool duplicate = false;
+          for (auto* existing : vm->properties) {
+            if (existing != nullptr && existing->name == prop->name) {
+              duplicate = true;
+              break;
+            }
+          }
+          if (duplicate) {
+            ReportError(doc, child.get(),
+                        "Duplicate ViewModel property name '" + prop->name + "' is ignored.");
+          } else {
+            vm->properties.push_back(prop);
+          }
+        }
+      }
+    } else if (child->type == DOMNodeType::Element) {
+      ReportError(
+          doc, child.get(),
+          "Element '" + child->name + "' is not allowed in 'ViewModel'. Expected: Property.");
+    }
+    child = child->nextSibling;
+  }
+  return vm;
+}
+
+static DataBind* ParseDataBind(const DOMNode* node, PAGXDocument* doc) {
+  auto bind = makeNodeFromXML<DataBind>(node, doc);
+  if (!bind) return nullptr;
+  bind->source = GetAttribute(node, "source");
+  bind->target = GetAttribute(node, "target");
+  bind->channel = GetAttribute(node, "channel");
+  if (bind->source.empty()) {
+    ReportError(doc, node, "DataBind requires a non-empty 'source' attribute.");
+  }
+  if (bind->target.empty()) {
+    ReportError(doc, node, "DataBind requires a non-empty 'target' attribute.");
+  }
+  if (bind->channel.empty()) {
+    ReportError(doc, node, "DataBind requires a non-empty 'channel' attribute.");
+  }
+  auto directionStr = GetAttribute(node, "direction");
+  if (!directionStr.empty()) {
+    if (directionStr == "ToTarget") {
+      bind->direction = DataBindDirection::ToTarget;
+    } else if (directionStr == "ToSource") {
+      bind->direction = DataBindDirection::ToSource;
+    } else if (directionStr == "TwoWay") {
+      bind->direction = DataBindDirection::TwoWay;
+    } else if (directionStr == "Once") {
+      bind->direction = DataBindDirection::Once;
+    } else {
+      ReportError(doc, node, "Invalid value '" + directionStr + "' for 'direction' attribute.");
+    }
+  }
+  return bind;
+}
+
+static DataConverter* ParseDataConverter(const DOMNode* node, PAGXDocument* doc) {
+  auto converter = makeNodeFromXML<DataConverter>(node, doc);
+  if (!converter) return nullptr;
+  converter->converterType = GetAttribute(node, "type");
+  auto child = node->firstChild;
+  while (child) {
+    if (child->type == DOMNodeType::Element && child->name == "Param") {
+      auto name = GetAttribute(child.get(), "name");
+      auto value = GetAttribute(child.get(), "value");
+      if (!name.empty()) {
+        converter->params[name] = value;
+      } else {
+        ReportError(doc, child.get(), "Param requires a non-empty 'name' attribute.");
+      }
+    } else if (child->type == DOMNodeType::Element) {
+      ReportError(
+          doc, child.get(),
+          "Element '" + child->name + "' is not allowed in 'DataConverter'. Expected: Param.");
+    }
+    child = child->nextSibling;
+  }
+  return converter;
 }
 
 }  // namespace pagx

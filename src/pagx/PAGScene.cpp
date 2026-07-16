@@ -18,18 +18,52 @@
 
 #include "pagx/PAGScene.h"
 #include "base/utils/Log.h"
+#include "pagx/DataBindRuntime.h"
+#include "pagx/DataContext.h"
+#include "pagx/PAGAnimation.h"
+#include "pagx/PAGImage.h"
 #include "pagx/PAGLayer.h"
+#include "pagx/PAGStateMachine.h"
+#include "pagx/PAGStateMachineRegion.h"
 #include "pagx/PAGSurface.h"
+#include "pagx/PAGViewModel.h"
 #include "pagx/PAGXDocument.h"
+#include "pagx/PropertyData.h"
 #include "pagx/nodes/Animation.h"
+#include "pagx/nodes/Composition.h"
+#include "pagx/nodes/DataBind.h"
+#include "pagx/nodes/Image.h"
 #include "pagx/nodes/Layer.h"
+#include "pagx/nodes/StateMachine.h"
+#include "pagx/nodes/ViewModel.h"
+#include "pagx/nodes/ViewModelProperty.h"
 #include "pagx/runtime/Drawable.h"
+#include "pagx/tgfx.h"
 #include "pagx/types/Matrix.h"
 #include "renderer/LayerBuilder.h"
 #include "renderer/ToTGFX.h"
 #include "tgfx/layers/DisplayList.h"
 
 namespace pagx {
+
+// Decodes an <Image> resource node into a PAGImage using the same precedence as the renderer's
+// ImagePattern path: host-injected data first, then an inline data URI, then an external file path.
+// Returns nullptr for a null node or one with no usable source.
+static std::shared_ptr<PAGImage> DecodeImageNode(const Image* imageNode) {
+  if (imageNode == nullptr) {
+    return nullptr;
+  }
+  if (imageNode->data) {
+    return PAGImage::MakeFromData(imageNode->data);
+  }
+  if (imageNode->filePath.find("data:") == 0) {
+    return PAGImage::MakeFromDataURI(imageNode->filePath);
+  }
+  if (!imageNode->filePath.empty()) {
+    return PAGImage::MakeFromPath(imageNode->filePath);
+  }
+  return nullptr;
+}
 
 PAGScene::PAGScene() = default;
 
@@ -65,7 +99,16 @@ void PAGScene::buildRuntimeTree() {
   if (_rootComposition != nullptr && _rootComposition->runtimeLayer != nullptr) {
     _rootComposition->runtimeLayer->removeFromParent();
   }
-  timelinesByAnimation.clear();
+  // A rebuild destroys the previous runtime tree and recreates all view models, so any pending
+  // notifications held as raw PAGViewModelValue* would dangle. We therefore intentionally drop the
+  // pending list and force-exit any active SuppressDelegation scope here. This means that if a
+  // rebuild happens inside an active SuppressDelegation guard, its deferred observer notifications
+  // are silently discarded (the guard's destructor later finds an empty list): the values they
+  // referenced are being destroyed, so re-dispatching them is unsafe. Callers must not rely on
+  // deferred notifications surviving a runtime-tree rebuild.
+  pendingNotifications.clear();
+  suppressNotify = false;
+  instantiatedTimelines.clear();
   auto buildResult = LayerBuilder::BuildForRuntime(document.get());
   auto rootComp = std::shared_ptr<PAGComposition>(
       new PAGComposition(nullptr, std::move(buildResult.root), shared_from_this()));
@@ -75,6 +118,270 @@ void PAGScene::buildRuntimeTree() {
   std::unordered_set<const Composition*> visited = {};
   _rootComposition->buildChildren(document->layers, visited);
   displayList->root()->addChild(rootComp->runtimeLayer);
+  // Eagerly create top-level PAGStateMachine instances so DataBindRuntime can resolve
+  // DataBind targets that reference state machines during buildViewModels().
+  for (auto* node : document->animations) {
+    if (node != nullptr && node->nodeType() == NodeType::StateMachine) {
+      auto* smNode = static_cast<StateMachine*>(node);
+      if (instantiatedTimelines.find(smNode) == instantiatedTimelines.end()) {
+        auto instance = std::shared_ptr<PAGStateMachine>(new PAGStateMachine(
+            smNode, _rootComposition->binding.get(), document.get(), shared_from_this()));
+        instantiatedTimelines.emplace(smNode, instance);
+        _rootComposition->binding->setTarget(
+            smNode, std::make_unique<StateMachineInputTarget>(instance, smNode));
+      }
+    }
+  }
+  buildViewModels();
+}
+
+std::shared_ptr<PAGViewModel> PAGScene::CreateViewModelFromSchema(
+    ViewModel* schema, const std::shared_ptr<PAGScene>& scene,
+    std::unordered_set<const ViewModel*>& visited) {
+  if (schema == nullptr) return nullptr;
+  // Guard against cyclic viewModelRef chains (A -> B -> A) which would recurse forever; the
+  // importer does not reject such cycles, so stop at a schema already on the current path. The
+  // schema is erased on return so two sibling properties referencing the same schema each get
+  // their own instance rather than being mistaken for a cycle.
+  if (!visited.insert(schema).second) return nullptr;
+  auto vm = std::shared_ptr<PAGViewModel>(new PAGViewModel());
+  vm->_id = schema->id;
+  for (auto* prop : schema->properties) {
+    if (prop == nullptr) continue;
+    std::shared_ptr<PAGViewModelValue> value = nullptr;
+    switch (prop->propertyType) {
+      case ViewModelPropertyType::Number: {
+        auto v = std::make_shared<PAGViewModelValueNumber>();
+        v->propertyValue = prop->defaultNumber;
+        v->type = ViewModelPropertyType::Number;
+        value = std::move(v);
+        break;
+      }
+      case ViewModelPropertyType::String: {
+        auto v = std::make_shared<PAGViewModelValueString>();
+        v->propertyValue = prop->defaultString;
+        v->type = ViewModelPropertyType::String;
+        value = std::move(v);
+        break;
+      }
+      case ViewModelPropertyType::Boolean: {
+        auto v = std::make_shared<PAGViewModelValueBoolean>();
+        v->propertyValue = prop->defaultBoolean;
+        v->type = ViewModelPropertyType::Boolean;
+        value = std::move(v);
+        break;
+      }
+      case ViewModelPropertyType::Color: {
+        auto v = std::make_shared<PAGViewModelValueColor>();
+        v->propertyValue = prop->defaultColor;
+        v->type = ViewModelPropertyType::Color;
+        value = std::move(v);
+        break;
+      }
+      case ViewModelPropertyType::Image: {
+        auto v = std::make_shared<PAGViewModelValueImage>();
+        // Decode from the referenced <Image> resource. Remember the source node so a later resource
+        // change (host loadFileData) can re-decode this value, unless the business side has assigned
+        // its own value in the meantime (tracked by userAssigned).
+        v->sourceImage = prop->defaultImage;
+        v->propertyValue = DecodeImageNode(prop->defaultImage);
+        v->type = ViewModelPropertyType::Image;
+        value = std::move(v);
+        break;
+      }
+      case ViewModelPropertyType::ViewModel: {
+        auto v = std::make_shared<PAGViewModelValueViewModel>();
+        v->type = ViewModelPropertyType::ViewModel;
+        // Instantiate the nested VM from the referenced schema now, so a property declared as
+        // ViewModel carries its child instance regardless of whether a Composition later binds
+        // it. DataBind source paths ($vm.child.leaf) and referenceViewModel() both rely on this
+        // link being present; without it, a pure data-nesting declaration (no Composition) could
+        // neither be read through the VM API nor resolved by DataContext.
+        if (prop->viewModelRef != nullptr) {
+          v->referenceInstance = CreateViewModelFromSchema(prop->viewModelRef, scene, visited);
+        }
+        value = std::move(v);
+        break;
+      }
+      case ViewModelPropertyType::Enum: {
+        auto v = std::make_shared<PAGViewModelValueEnum>();
+        v->propertyValue = prop->defaultEnum;
+        v->type = ViewModelPropertyType::Enum;
+        value = std::move(v);
+        break;
+      }
+      case ViewModelPropertyType::Trigger: {
+        auto v = std::make_shared<PAGViewModelValueTrigger>();
+        v->type = ViewModelPropertyType::Trigger;
+        value = std::move(v);
+        break;
+      }
+    }
+    if (value) {
+      value->propertyName = prop->name;
+      value->setScene(scene);
+      value->converter = prop->dataConverter;
+      std::shared_ptr<PropertyData> pd;
+      switch (prop->propertyType) {
+        case ViewModelPropertyType::Number: {
+          auto d = std::make_shared<NumberPropertyData>();
+          d->defaultValue = prop->defaultNumber;
+          if (prop->minValue.has_value()) d->minValue = prop->minValue;
+          if (prop->maxValue.has_value()) d->maxValue = prop->maxValue;
+          pd = d;
+          break;
+        }
+        case ViewModelPropertyType::String: {
+          auto d = std::make_shared<StringPropertyData>();
+          d->defaultValue = prop->defaultString;
+          pd = d;
+          break;
+        }
+        case ViewModelPropertyType::Boolean: {
+          auto d = std::make_shared<BooleanPropertyData>();
+          d->defaultValue = prop->defaultBoolean;
+          pd = d;
+          break;
+        }
+        case ViewModelPropertyType::Color: {
+          auto d = std::make_shared<ColorPropertyData>();
+          d->defaultValue = prop->defaultColor;
+          pd = d;
+          break;
+        }
+        case ViewModelPropertyType::Image: {
+          auto d = std::make_shared<ImagePropertyData>();
+          pd = d;
+          break;
+        }
+        case ViewModelPropertyType::ViewModel: {
+          auto d = std::make_shared<ViewModelPropertyData>();
+          if (prop->viewModelRef != nullptr) d->viewModelId = prop->viewModelRef->id;
+          pd = d;
+          break;
+        }
+        case ViewModelPropertyType::Enum: {
+          auto d = std::make_shared<EnumPropertyData>();
+          d->options = prop->enumOptions;
+          d->defaultValue = prop->defaultEnum;
+          pd = d;
+          break;
+        }
+        case ViewModelPropertyType::Trigger: {
+          auto d = std::make_shared<TriggerPropertyData>();
+          pd = d;
+          break;
+        }
+      }
+      pd->propertyName = prop->name;
+      pd->customDataMap = prop->customData;
+      value->pd = std::move(pd);
+      // The importer rejects empty and duplicate property names, so a schema reaching this point is
+      // expected to have unique non-empty names; keeping propertyMap and propertyList consistent
+      // relies on that invariant.
+      DEBUG_ASSERT(!prop->name.empty() &&
+                   vm->propertyMap.find(prop->name) == vm->propertyMap.end());
+      vm->propertyMap[prop->name] = value;
+      vm->propertyList.push_back(value);
+    }
+  }
+  visited.erase(schema);
+  return vm;
+}
+
+void PAGScene::buildNestedViewModels(PAGComposition* parentComp) {
+  if (parentComp == nullptr) return;
+  std::vector<PAGComposition*> childComps = {};
+  PAGComposition::CollectChildCompositions(parentComp, childComps);
+  for (auto* childComp : childComps) {
+    const auto* sourceLayer = childComp->node;
+    if (sourceLayer == nullptr || sourceLayer->composition == nullptr) continue;
+    const auto* compSchema = sourceLayer->composition;
+    std::shared_ptr<PAGViewModel> childVM = nullptr;
+    if (compSchema->viewModel != nullptr) {
+      // Reuse the nested VM the parent already declared for this slot (instantiated from the
+      // property's viewModelRef during the parent VM creation) when present, so the Composition
+      // shares the parent's instance rather than building a divergent one. An open slot (property
+      // declared without viewModelRef) is back-filled here from the Composition's own schema.
+      std::shared_ptr<PAGViewModelValueViewModel> parentSlot;
+      if (parentComp->compositionViewModel != nullptr && !sourceLayer->vmContext.empty()) {
+        auto propName = sourceLayer->vmContext;
+        if (propName.find("$vm.") == 0) propName = propName.substr(4);
+        parentSlot = parentComp->compositionViewModel->propertyViewModel(propName);
+        if (parentSlot != nullptr) {
+          childVM = parentSlot->referenceInstance;
+        }
+      }
+      if (childVM == nullptr) {
+        std::unordered_set<const ViewModel*> nestedVisited = {};
+        childVM = PAGScene::CreateViewModelFromSchema(compSchema->viewModel, shared_from_this(),
+                                                      nestedVisited);
+        if (parentSlot != nullptr) {
+          parentSlot->referenceInstance = childVM;
+        }
+      }
+      childComp->compositionViewModel = childVM;
+    }
+    // A nested Composition may carry DataBinds that reference a parent ViewModel property even when
+    // it has no ViewModel of its own. Build a DataContext (with null VM when absent) chained to the
+    // parent so resolve() can walk up to the parent VM. Binding is deferred to buildViewModels'
+    // final pass: a parent dataBind may descend through a ViewModel reference into a nested
+    // instance, and DataBindRuntime::bind() resolves (and caches) source paths once, so every
+    // referenceInstance must be linked before any bind() runs.
+    if (compSchema->viewModel != nullptr || !compSchema->dataBinds.empty()) {
+      childComp->dataBindRuntime = std::make_unique<DataBindRuntime>();
+      auto dataCtx = std::make_shared<DataContext>(childVM);
+      if (parentComp->dataContext != nullptr) dataCtx->parent(parentComp->dataContext);
+      childComp->dataContext = dataCtx;
+    }
+    buildNestedViewModels(childComp);
+  }
+}
+
+void PAGScene::buildViewModels() {
+  auto self = shared_from_this();
+  std::unordered_set<const ViewModel*> visited = {};
+  rootViewModel = PAGScene::CreateViewModelFromSchema(document->viewModel, self, visited);
+  if (rootViewModel != nullptr && _rootComposition != nullptr) {
+    _rootComposition->compositionViewModel = rootViewModel;
+    _rootComposition->dataBindRuntime = std::make_unique<DataBindRuntime>();
+    _rootComposition->dataContext = std::make_shared<DataContext>(rootViewModel);
+  }
+  if (_rootComposition == nullptr) {
+    return;
+  }
+  // Build the entire nested ViewModel tree (VMs, contexts, referenceInstance links) before binding
+  // any dataBinds. DataBindRuntime::bind() resolves each source path once and caches the result, so
+  // a cross-level source such as "$vm.nestedRef.childProp" only resolves correctly after every
+  // nested referenceInstance is linked. Binding eagerly during tree construction would resolve such
+  // a path to null and permanently drop the bind.
+  buildNestedViewModels(_rootComposition.get());
+  // Deferred binding pass over the whole composition tree. Root binds document->dataBinds against
+  // the document; each nested composition binds its own schema's dataBinds against its document.
+  std::vector<PAGComposition*> pending = {_rootComposition.get()};
+  while (!pending.empty()) {
+    auto* comp = pending.back();
+    pending.pop_back();
+    if (comp->dataBindRuntime != nullptr) {
+      const std::vector<DataBind*>* binds = nullptr;
+      PAGXDocument* bindDoc = nullptr;
+      if (comp == _rootComposition.get()) {
+        binds = &document->dataBinds;
+        bindDoc = document.get();
+      } else if (comp->node != nullptr && comp->node->composition != nullptr) {
+        binds = &comp->node->composition->dataBinds;
+        bindDoc = comp->document;
+      }
+      if (binds != nullptr && !binds->empty()) {
+        comp->dataBindRuntime->bind(*binds, comp->dataContext.get(), bindDoc, comp->binding.get());
+      }
+    }
+    std::vector<PAGComposition*> childComps = {};
+    PAGComposition::CollectChildCompositions(comp, childComps);
+    for (auto* childComp : childComps) {
+      pending.push_back(childComp);
+    }
+  }
 }
 
 PAGScene::~PAGScene() {
@@ -83,44 +390,46 @@ PAGScene::~PAGScene() {
   }
 }
 
-std::vector<std::string> PAGScene::getTimelineIds() const {
+std::vector<std::string> PAGScene::getAnimationIds() const {
   std::vector<std::string> ids = {};
   if (document == nullptr) {
     return ids;
   }
-  ids.reserve(document->animations.size());
-  for (auto* animation : document->animations) {
-    if (animation != nullptr) {
-      ids.push_back(animation->id);
+  for (auto* node : document->animations) {
+    if (node != nullptr && node->nodeType() == NodeType::Animation) {
+      ids.push_back(static_cast<Animation*>(node)->id);
     }
   }
   return ids;
 }
 
-std::shared_ptr<PAGTimeline> PAGScene::getTimeline(const std::string& id) {
+std::shared_ptr<PAGAnimation> PAGScene::getAnimation(const std::string& id) {
   if (document == nullptr) {
     return nullptr;
   }
   Animation* matched = nullptr;
-  for (auto* animation : document->animations) {
-    if (animation != nullptr && animation->id == id) {
-      matched = animation;
-      break;
+  for (auto* node : document->animations) {
+    if (node != nullptr && node->nodeType() == NodeType::Animation) {
+      auto* animation = static_cast<Animation*>(node);
+      if (animation->id == id) {
+        matched = animation;
+        break;
+      }
     }
   }
   if (matched == nullptr) {
     return nullptr;
   }
-  auto it = timelinesByAnimation.find(matched);
-  if (it != timelinesByAnimation.end()) {
-    return it->second;
+  auto it = instantiatedTimelines.find(matched);
+  if (it != instantiatedTimelines.end()) {
+    return std::static_pointer_cast<PAGAnimation>(it->second);
   }
   // Construct with a null binding so the timeline resolves the scene's current root binding lazily
   // at apply time. A user-cached handle then survives a runtime-tree rebuild (foreign external-doc
   // edit) that replaces _rootComposition and frees the old binding, instead of dangling.
-  auto timeline = std::shared_ptr<PAGTimeline>(
-      new PAGTimeline(matched, nullptr, document.get(), weak_from_this()));
-  timelinesByAnimation.emplace(matched, timeline);
+  auto timeline = std::shared_ptr<PAGAnimation>(
+      new PAGAnimation(matched, nullptr, document.get(), weak_from_this()));
+  instantiatedTimelines.emplace(matched, timeline);
   return timeline;
 }
 
@@ -128,11 +437,63 @@ std::shared_ptr<PAGTimeline> PAGScene::getDefaultTimeline() {
   if (document == nullptr || document->animations.empty()) {
     return nullptr;
   }
-  auto* first = document->animations.front();
-  if (first == nullptr) {
+  for (auto* node : document->animations) {
+    if (node == nullptr) {
+      continue;
+    }
+    if (node->nodeType() == NodeType::Animation) {
+      return getAnimation(static_cast<Animation*>(node)->id);
+    }
+    if (node->nodeType() == NodeType::StateMachine) {
+      return getStateMachineTimeline(static_cast<StateMachine*>(node)->id);
+    }
+  }
+  return nullptr;
+}
+
+std::vector<std::string> PAGScene::getStateMachineIds() const {
+  std::vector<std::string> ids = {};
+  if (document == nullptr) {
+    return ids;
+  }
+  for (auto* node : document->animations) {
+    if (node != nullptr && node->nodeType() == NodeType::StateMachine) {
+      ids.push_back(static_cast<StateMachine*>(node)->id);
+    }
+  }
+  return ids;
+}
+
+std::shared_ptr<PAGStateMachine> PAGScene::getStateMachineTimeline(const std::string& id) {
+  if (document == nullptr) {
     return nullptr;
   }
-  return getTimeline(first->id);
+  StateMachine* matched = nullptr;
+  for (auto* node : document->animations) {
+    if (node != nullptr && node->nodeType() == NodeType::StateMachine) {
+      auto* stateMachine = static_cast<StateMachine*>(node);
+      if (stateMachine->id == id) {
+        matched = stateMachine;
+        break;
+      }
+    }
+  }
+  if (matched == nullptr) {
+    return nullptr;
+  }
+  auto it = instantiatedTimelines.find(matched);
+  if (it != instantiatedTimelines.end()) {
+    return std::static_pointer_cast<PAGStateMachine>(it->second);
+  }
+  if (_rootComposition == nullptr) {
+    return nullptr;
+  }
+  auto timeline = std::shared_ptr<PAGStateMachine>(new PAGStateMachine(
+      matched, _rootComposition->binding.get(), document.get(), weak_from_this()));
+  instantiatedTimelines.emplace(matched, timeline);
+  _rootComposition->binding->setTarget(
+      matched, std::make_unique<StateMachineInputTarget>(timeline, matched));
+  return timeline;
 }
 
 std::shared_ptr<PAGComposition> PAGScene::rootComposition() const {
@@ -146,6 +507,7 @@ bool PAGScene::draw(const std::shared_ptr<PAGSurface>& surface, bool autoClear) 
   if (_rootComposition == nullptr || _rootComposition->runtimeLayer == nullptr) {
     return false;
   }
+  flushDataBinds();
   auto& drawable = surface->drawable;
   auto device = drawable->getDevice();
   if (device == nullptr) {
@@ -155,14 +517,23 @@ bool PAGScene::draw(const std::shared_ptr<PAGSurface>& surface, bool autoClear) 
   if (context == nullptr) {
     return false;
   }
-  auto tgfxSurface = drawable->getSurface(context);
-  if (tgfxSurface == nullptr) {
+  if (!renderTo(surface, context, autoClear)) {
     device->unlock();
     return false;
   }
-  displayList->render(tgfxSurface.get(), autoClear);
   drawable->present(context);
   device->unlock();
+  return true;
+}
+
+bool PAGScene::renderTo(const std::shared_ptr<PAGSurface>& surface, tgfx::Context* context,
+                        bool autoClear) {
+  auto tgfxSurface = surface->drawable->getSurface(context);
+  if (tgfxSurface == nullptr) {
+    return false;
+  }
+  displayList->render(tgfxSurface.get(), autoClear);
+  clearAllViewModelsDirty();
   return true;
 }
 
@@ -185,6 +556,74 @@ void PAGScene::advanceAndApply(int64_t deltaMicroseconds) {
   }
 }
 
+std::shared_ptr<PAGViewModel> PAGScene::viewModel() const {
+  return rootViewModel;
+}
+
+void PAGScene::flushDataBinds() {
+  if (_rootComposition != nullptr) _rootComposition->updateDataBinds();
+}
+
+void PAGScene::clearAllViewModelsDirty() {
+  if (_rootComposition != nullptr) {
+    ClearCompositionTreeDirty(_rootComposition.get());
+  }
+}
+
+void PAGScene::ClearCompositionTreeDirty(PAGComposition* comp) {
+  if (comp == nullptr) {
+    return;
+  }
+  if (comp->compositionViewModel != nullptr) {
+    comp->compositionViewModel->clearDirty();
+  }
+  std::vector<PAGComposition*> childComps = {};
+  PAGComposition::CollectChildCompositions(comp, childComps);
+  for (auto* childComp : childComps) {
+    ClearCompositionTreeDirty(childComp);
+  }
+}
+
+void PAGScene::RefreshViewModelImages(PAGComposition* comp,
+                                      const std::unordered_set<const Image*>& changed) {
+  if (comp == nullptr) {
+    return;
+  }
+  if (comp->compositionViewModel != nullptr) {
+    for (const auto& value : comp->compositionViewModel->properties()) {
+      if (value == nullptr || value->valueType() != ViewModelPropertyType::Image) {
+        continue;
+      }
+      auto* imageValue = static_cast<PAGViewModelValueImage*>(value.get());
+      if (imageValue->sourceImage == nullptr ||
+          changed.find(imageValue->sourceImage) == changed.end()) {
+        continue;
+      }
+      // Preserve a business-side assignment: only re-decode the schema default while the value has
+      // not been explicitly assigned through the public setter. Route through
+      // setValueInternal(fromVM=true) so observers fire and dependent DataBinds are marked dirty
+      // (the new image reaches bound targets on the next draw).
+      if (imageValue->userAssigned) {
+        continue;
+      }
+      imageValue->setValueInternal(DecodeImageNode(imageValue->sourceImage), true);
+    }
+  }
+  std::vector<PAGComposition*> childComps = {};
+  PAGComposition::CollectChildCompositions(comp, childComps);
+  for (auto* childComp : childComps) {
+    RefreshViewModelImages(childComp, changed);
+  }
+}
+
+void PAGScene::onImageResourcesChanged(const std::vector<Image*>& changedImages) {
+  if (changedImages.empty() || _rootComposition == nullptr) {
+    return;
+  }
+  std::unordered_set<const Image*> changed(changedImages.begin(), changedImages.end());
+  RefreshViewModelImages(_rootComposition.get(), changed);
+}
+
 std::vector<std::shared_ptr<PAGLayer>> PAGScene::getLayersUnderPoint(float surfaceX,
                                                                      float surfaceY) {
   float rootX = 0;
@@ -199,7 +638,7 @@ std::vector<std::shared_ptr<PAGLayer>> PAGScene::getLayersUnderPoint(float surfa
   auto hitLayers = _rootComposition->runtimeLayer->getLayersUnderPoint(rootX, rootY);
   for (const auto& hitLayer : hitLayers) {
     auto it = layerRegistry.find(hitLayer.get());
-    if (it != layerRegistry.end() && it->second->layerType() == LayerType::Layer) {
+    if (it != layerRegistry.end()) {
       result.push_back(it->second->shared_from_this());
     }
   }
@@ -280,10 +719,12 @@ void PAGScene::onNodesChanged(const std::vector<Node*>& dirtyNodes) {
     std::unordered_set<const Composition*> visited = {};
     _rootComposition->refreshNodes(dirtyNodes, dirtySet, visited);
   }
-  // Reset every timeline only when a timeline node (Animation / AnimationObject / Channel) changed.
-  // Timelines can share targets and cross-reference, so the whole timeline tree is rebuilt rather
-  // than patched in place; a removed animation node then simply produces no timeline. Edits that do
-  // not touch a timeline node leave playback untouched.
+  // Reset every timeline only when a timeline node changed. Timelines (Animation drivers and the
+  // state machines that play them) can share targets and cross-reference, so the whole timeline
+  // tree is rebuilt rather than patched in place; a removed animation or state machine then simply
+  // produces no timeline, and structural edits to a state machine (added/removed states,
+  // transitions, inputs) drop the stale instance instead of running off dangling pointers. Edits
+  // that do not touch a timeline node leave playback untouched.
   bool timelineDirty = false;
   for (auto* node : dirtyNodes) {
     if (node == nullptr) {
@@ -291,7 +732,10 @@ void PAGScene::onNodesChanged(const std::vector<Node*>& dirtyNodes) {
     }
     auto type = node->nodeType();
     if (type == NodeType::Animation || type == NodeType::AnimationObject ||
-        type == NodeType::Channel) {
+        type == NodeType::Channel || type == NodeType::StateMachine ||
+        type == NodeType::StateRegion || type == NodeType::State ||
+        type == NodeType::StateTransition || type == NodeType::TransitionCondition ||
+        type == NodeType::StateMachineInput) {
       timelineDirty = true;
       break;
     }
@@ -300,7 +744,7 @@ void PAGScene::onNodesChanged(const std::vector<Node*>& dirtyNodes) {
     if (_rootComposition != nullptr) {
       _rootComposition->resetTimelines();
     }
-    timelinesByAnimation.clear();
+    instantiatedTimelines.clear();
   }
 }
 
@@ -310,6 +754,25 @@ RuntimeBinding* PAGScene::mutableBinding() {
 
 tgfx::DisplayList* PAGScene::getDisplayListForOptions() const {
   return displayList.get();
+}
+
+bool PAGScene::hasContentChanged() const {
+  return displayList != nullptr && displayList->hasContentChanged();
+}
+
+std::unique_ptr<tgfx::Recording> Record(tgfx::Context* context,
+                                        const std::shared_ptr<PAGScene>& scene,
+                                        const std::shared_ptr<PAGSurface>& surface,
+                                        bool autoClear) {
+  if (scene == nullptr || context == nullptr || surface == nullptr) {
+    return nullptr;
+  }
+  scene->flushDataBinds();
+  if (!scene->renderTo(surface, context, autoClear)) {
+    return nullptr;
+  }
+  auto recording = context->flush();
+  return recording;
 }
 
 }  // namespace pagx

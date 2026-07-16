@@ -23,8 +23,9 @@
 
 namespace pagx {
 
-class Animation;
+class DataBind;
 class Layer;
+class ViewModel;
 
 /**
  * Composition represents a reusable composition resource that contains a set of layers. It can be
@@ -48,9 +49,19 @@ class Composition : public Node {
   std::vector<Layer*> layers = {};
 
   /**
-   * The animations contained in this composition.
+   * The animation and state-machine definitions declared inside this composition's
+   * &lt;Animations&gt; block, in declaration order. Each entry is either an Animation or a
+   * StateMachine; check nodeType() to dispatch.
    */
-  std::vector<Animation*> animations = {};
+  std::vector<Node*> animations = {};
+  /**
+   * The ViewModel schema bound to this composition.
+   */
+  ViewModel* viewModel = nullptr;
+  /**
+   * DataBind nodes that bind ViewModel properties to this composition's layers.
+   */
+  std::vector<DataBind*> dataBinds = {};
 
   NodeType nodeType() const override {
     return NodeType::Composition;
